@@ -19,7 +19,7 @@ def load_dino(cfg: SimpleNamespace) -> tuple:
         cfg.model.dino_name,
         torch_dtype=torch.float16,
         device_map="auto",
-        attn_implementation="sdpa",
+        attn_implementation="eager",
     )
     model.eval()
     return model, processor
@@ -31,12 +31,14 @@ def _extract_patch_features(model, processor, image: Image.Image) -> torch.Tenso
     inputs = processor(images=image, return_tensors="pt").to(model.device)
     outputs = model(**inputs)
     num_register = getattr(model.config, "num_register_tokens", 0)
-    patch_features = outputs.last_hidden_state[0, 1 + num_register:]  # (P, D)
+    patch_features = outputs.last_hidden_state[0, 1 + num_register :]  # (P, D)
     return patch_features
 
 
 @torch.inference_mode()
-def _get_raw_attention_map(model, processor, image: Image.Image) -> tuple[np.ndarray, tuple[int, int]]:
+def _get_raw_attention_map(
+    model, processor, image: Image.Image
+) -> tuple[np.ndarray, tuple[int, int]]:
     """Return mean [CLS->patch] attention as (num_h, num_w) numpy array
     and (img_w, img_h) for upsampling reference."""
     inputs = processor(images=image, return_tensors="pt").to(model.device)
@@ -48,7 +50,7 @@ def _get_raw_attention_map(model, processor, image: Image.Image) -> tuple[np.nda
     _, _, h, w = inputs["pixel_values"].shape
     num_h, num_w = h // patch_size, w // patch_size
 
-    cls_attn = attn[:, 0, 1 + num_register:].mean(dim=0)  # (num_patches,)
+    cls_attn = attn[:, 0, 1 + num_register :].mean(dim=0)  # (num_patches,)
     attn_map = cls_attn.reshape(num_h, num_w).float().cpu().numpy()
     return attn_map, (image.width, image.height)
 
@@ -56,7 +58,9 @@ def _get_raw_attention_map(model, processor, image: Image.Image) -> tuple[np.nda
 def _upsample_attn(attn_map: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
     """Bilinear upsample attention map to (target_h, target_w)."""
     t = torch.from_numpy(attn_map).unsqueeze(0).unsqueeze(0).float()
-    up = F.interpolate(t, size=(target_h, target_w), mode="bilinear", align_corners=False)
+    up = F.interpolate(
+        t, size=(target_h, target_w), mode="bilinear", align_corners=False
+    )
     return up.squeeze().numpy()
 
 
@@ -136,10 +140,12 @@ def _count_blobs(binary_map: np.ndarray, min_size: int) -> int:
     return count
 
 
-def _attention_blob_count(model, processor, image: Image.Image, cfg: SimpleNamespace) -> int:
+def _attention_blob_count(
+    model, processor, image: Image.Image, cfg: SimpleNamespace
+) -> int:
     attn_map, _ = _get_raw_attention_map(model, processor, image)
     threshold = cfg.dino.attention_threshold * attn_map.max()
-    binary = (attn_map >= threshold)
+    binary = attn_map >= threshold
     return _count_blobs(binary, cfg.dino.min_blob_size)
 
 
@@ -168,7 +174,7 @@ def _reference_similarity_count(
     _, _, h, w = inputs["pixel_values"].shape
     sim_map = sim.reshape(h // patch_size, w // patch_size).numpy()
 
-    binary = (sim_map >= cfg.dino.similarity_threshold)
+    binary = sim_map >= cfg.dino.similarity_threshold
     count = _count_blobs(binary, cfg.dino.min_region_size)
 
     if count == 0:
