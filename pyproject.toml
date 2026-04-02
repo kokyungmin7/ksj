@@ -1,0 +1,23 @@
+[project]
+name = "ksj"
+version = "0.1.0"
+description = "Korean Recycling VQA with Qwen3-VL + DINOv3"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3.0",
+    "torchvision>=0.18.0",
+    "transformers @ git+https://github.com/huggingface/transformers",
+    "peft>=0.14.0",
+    "trl>=0.12.0",
+    "accelerate>=0.34.0",
+    "bitsandbytes>=0.43.0",
+    "qwen-vl-utils>=0.0.8",
+    "pandas>=2.2.0",
+    "pillow>=10.3.0",
+    "scikit-learn>=1.5.0",
+    "scipy>=1.13.0",
+    "pyyaml>=6.0.1",
+    "tqdm>=4.66.0",
+    "matplotlib>=3.8.0",
+]

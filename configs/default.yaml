@@ -1,0 +1,63 @@
+model:
+  qwen_name: "Qwen/Qwen3-VL-8B-Instruct"
+  dino_name: "facebook/dinov3-vits16-pretrain-lvd1689m"
+  torch_dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"  # "eager" if flash_attn not installed
+
+data:
+  csv_path: "train.csv"
+  image_root: "."
+  val_split: 0.2
+  seed: 42
+  subset: null  # int: use only N samples (stratified); null: use all
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+training:
+  output_dir: "outputs/qwen3vl-lora"
+  num_train_epochs: 3
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  logging_steps: 10
+  save_steps: 200
+  save_total_limit: 2
+  bf16: true
+  gradient_checkpointing: true
+  max_seq_length: 1024
+  remove_unused_columns: false
+
+evaluation:
+  output_dir: "results"
+  max_new_tokens: 5
+
+dino:
+  attention_threshold: 0.6    # binarization threshold for attention map
+  min_blob_size: 50           # minimum pixel area to count as a blob
+  reference_dir: null         # path to reference gallery dir; null = attention mode
+  similarity_threshold: 0.75  # cosine similarity threshold for reference-based counting
+  min_region_size: 30         # minimum pixel area for similarity map blobs
+  crop_padding: 20            # pixels of padding around attention bbox
+  crop_min_size: 64           # minimum crop size in pixels; fallback to full image if smaller
+
+visualization:
+  enabled: true
+  output_dir: "results/viz"
+  save_every: 1               # save visualization every N samples (1 = all)
+  max_samples: null           # maximum number of visualizations to save (null = all)
+  dpi: 150

@@ -1,0 +1,63 @@
+model:
+  qwen_name: "Qwen/Qwen3-VL-8B-Instruct"
+  dino_name: "facebook/dinov3-vits16-pretrain-lvd1689m"
+  torch_dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+
+data:
+  csv_path: "train.csv"
+  image_root: "."
+  val_split: 0.2
+  seed: 42
+  subset: 500  # fast experiment: 400 train + 100 val
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+training:
+  output_dir: "outputs/qwen3vl-lora-fast"
+  num_train_epochs: 1
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  logging_steps: 5
+  save_steps: 50
+  save_total_limit: 1
+  bf16: true
+  gradient_checkpointing: true
+  max_seq_length: 1024
+  remove_unused_columns: false
+
+evaluation:
+  output_dir: "results"
+  max_new_tokens: 5
+
+dino:
+  attention_threshold: 0.6
+  min_blob_size: 50
+  reference_dir: null
+  similarity_threshold: 0.75
+  min_region_size: 30
+  crop_padding: 20
+  crop_min_size: 64
+
+visualization:
+  enabled: true
+  output_dir: "results/viz"
+  save_every: 1
+  max_samples: null
+  dpi: 150
