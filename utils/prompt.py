@@ -25,7 +25,7 @@ def build_messages(row: dict, image_root: str) -> list[dict]:
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": f"file://{image_path}"},
+                {"type": "image", "image": image_path},
                 {"type": "text", "text": _CHOICE_TEXT.format(**row)},
             ],
         },
@@ -41,8 +41,8 @@ def build_messages_with_crop(row: dict, image_root: str, crop_path: str) -> list
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": f"file://{image_path}"},
-                {"type": "image", "image": f"file://{crop_abs}"},
+                {"type": "image", "image": image_path},
+                {"type": "image", "image": crop_abs},
                 {
                     "type": "text",
                     "text": (
