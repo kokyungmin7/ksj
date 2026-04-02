@@ -47,6 +47,7 @@ evaluation:
   max_new_tokens: 5
 
 dino:
+  enabled: true               # false: DINOv3 not loaded; Qwen handles all questions with original image only
   attention_threshold: 0.6
   min_blob_size: 50
   reference_dir: null

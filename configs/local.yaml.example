@@ -1,0 +1,42 @@
+# configs/local.yaml.example
+#
+# 추론 환경에서 기본값을 덮어쓰기 위한 로컬 설정 파일입니다.
+# 이 파일을 복사하여 configs/local.yaml 로 저장하고 필요한 값만 수정하세요.
+#
+#   cp configs/local.yaml.example configs/local.yaml
+#
+# - local.yaml은 .gitignore에 등록되어 있어 커밋되지 않습니다.
+# - default.yaml의 값을 덮어쓰며, 작성하지 않은 항목은 default.yaml 값을 그대로 사용합니다.
+# - 사용법: uv run main.py evaluate  (자동으로 local.yaml 감지)
+#           uv run main.py evaluate --config configs/local.yaml  (명시적 지정)
+
+# ── 자주 바꾸는 설정 예시 ─────────────────────────────────────────────────
+
+# 일부 샘플로만 빠르게 평가할 때
+# data:
+#   subset: 100
+
+# 체크포인트 경로가 환경마다 다를 때
+# training:
+#   output_dir: "/mnt/storage/checkpoints/qwen3vl-lora"
+
+# flash_attention2 미설치 환경
+# model:
+#   attn_implementation: "eager"
+
+# 시각화 저장 끄기 (속도 우선)
+# visualization:
+#   enabled: false
+
+# DINOv3 완전 비활성화 (모델 로드 안 함, Qwen만 사용)
+# dino:
+#   enabled: false
+
+# DINOv3 threshold 실험
+# dino:
+#   attention_threshold: 0.5
+#   crop_padding: 30
+
+# 참조 갤러리 경로 (환경마다 다른 경우)
+# dino:
+#   reference_dir: "/mnt/storage/references/bong"

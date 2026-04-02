@@ -37,8 +37,13 @@ def run_evaluation(
         print("Loading base model (zero-shot evaluation) ...")
         qwen_model, qwen_processor = load_base_qwen(cfg)
 
-    print("Loading DINOv3 ...")
-    dino_model, dino_processor = load_dino(cfg)
+    dino_enabled = getattr(cfg.dino, "enabled", True)
+    if dino_enabled:
+        print("Loading DINOv3 ...")
+        dino_model, dino_processor = load_dino(cfg)
+    else:
+        print("DINOv3 disabled — skipping load.")
+        dino_model, dino_processor = None, None
 
     predictor = Predictor(
         qwen_model, qwen_processor,

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 from pipeline.router import is_counting_question
-from models.qwen import qwen_predict_with_crop
+from models.qwen import qwen_predict, qwen_predict_with_crop
 from models.dino import (
     get_attention_crop,
     dino_count,
@@ -17,14 +17,20 @@ from models.dino import (
 
 
 class Predictor:
-    """Routes each sample through DINOv3 crop → Qwen3-VL or DINOv3 count."""
+    """Routes each sample through DINOv3 crop → Qwen3-VL or DINOv3 count.
+
+    If cfg.dino.enabled is False, DINOv3 is not used at all:
+    - No crop is generated
+    - All questions go directly to Qwen with the original image
+    - trace will contain None for all DINOv3-related fields
+    """
 
     def __init__(
         self,
         qwen_model,
         qwen_processor,
-        dino_model,
-        dino_processor,
+        dino_model,           # None when cfg.dino.enabled is False
+        dino_processor,       # None when cfg.dino.enabled is False
         cfg: SimpleNamespace,
         reference_dir: str | None = None,
     ) -> None:
@@ -33,11 +39,13 @@ class Predictor:
         self.dino_model = dino_model
         self.dino_processor = dino_processor
         self.cfg = cfg
+        self.dino_enabled = getattr(cfg.dino, "enabled", True)
 
         self.reference_paths: list[str] | None = None
-        ref_dir = reference_dir or cfg.dino.reference_dir
-        if ref_dir:
-            self.reference_paths = load_reference_paths(ref_dir)
+        if self.dino_enabled:
+            ref_dir = reference_dir or cfg.dino.reference_dir
+            if ref_dir:
+                self.reference_paths = load_reference_paths(ref_dir)
 
     def predict(self, row: dict) -> str:
         """Return predicted answer letter (a/b/c/d)."""
@@ -45,22 +53,49 @@ class Predictor:
         return answer
 
     def predict_with_trace(self, row: dict) -> tuple[str, dict]:
-        """Return (answer, trace) where trace contains all intermediate results.
+        """Return (answer, trace) with all intermediate results.
 
         trace keys:
-            route          str   "dino_count" | "qwen_with_crop"
-            bbox           tuple (x1, y1, x2, y2) in original pixel coords
-            attn_map       np.ndarray  raw attention map (num_h × num_w)
-            attn_map_full  np.ndarray  upsampled to original image size
-            crop           PIL.Image   the cropped ROI
-            used_full      bool        True if crop fell back to full image
-            dino_count     int | None  estimated count (counting questions only)
-            raw_answer     str         raw generated text before extraction
+            route          str        "dino_count" | "qwen_with_crop" | "qwen_only"
+            bbox           tuple|None (x1, y1, x2, y2); None if dino disabled
+            attn_map       ndarray|None
+            attn_map_full  ndarray|None
+            crop           PIL.Image|None
+            used_full      bool|None
+            dino_count     int|None
+            raw_answer     str
         """
+        if not self.dino_enabled:
+            return self._predict_qwen_only(row)
+        return self._predict_with_dino(row)
+
+    def _predict_qwen_only(self, row: dict) -> tuple[str, dict]:
+        """Qwen inference on original image only (DINOv3 disabled)."""
+        answer = qwen_predict(
+            self.qwen_model,
+            self.qwen_processor,
+            row,
+            self.cfg.data.image_root,
+            self.cfg,
+        )
+        trace = {
+            "route": "qwen_only",
+            "bbox": None,
+            "attn_map": None,
+            "attn_map_full": None,
+            "crop": None,
+            "used_full": None,
+            "dino_count": None,
+            "raw_answer": answer,
+        }
+        return answer, trace
+
+    def _predict_with_dino(self, row: dict) -> tuple[str, dict]:
+        """DINOv3 crop + routing logic."""
         image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))
         image = Image.open(image_path).convert("RGB")
 
-        # Step 1: always extract attention crop via DINOv3
+        # Step 1: extract attention crop
         crop_result = get_attention_crop(
             self.dino_model, self.dino_processor, image, self.cfg
         )
@@ -76,10 +111,8 @@ class Predictor:
             "raw_answer": None,
         }
 
-        # Step 2: route by question type
-        question = str(row["question"])
-
-        if is_counting_question(question):
+        # Step 2: counting questions → DINOv3 count
+        if is_counting_question(str(row["question"])):
             count = dino_count(
                 self.dino_model,
                 self.dino_processor,
@@ -94,7 +127,6 @@ class Predictor:
                 trace["route"] = "dino_count"
                 trace["raw_answer"] = str(count)
                 return answer, trace
-            # Fallback: choices had no numbers → use Qwen with crop
 
         # Step 3: Qwen with original + crop
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:

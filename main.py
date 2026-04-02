@@ -1,12 +1,36 @@
 import argparse
+import os
 import yaml
 from types import SimpleNamespace
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. override values take precedence."""
+    result = base.copy()
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
 def load_config(path: str) -> SimpleNamespace:
-    """Recursively convert a YAML dict to SimpleNamespace for dot-access."""
+    """Load YAML config and deep-merge configs/local.yaml if it exists.
+
+    local.yaml only needs to contain the keys you want to override.
+    All other values are inherited from the base config.
+    """
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+
+    # Auto-detect local.yaml next to the given config file
+    local_path = os.path.join(os.path.dirname(path), "local.yaml")
+    if os.path.exists(local_path):
+        with open(local_path, encoding="utf-8") as f:
+            local_raw = yaml.safe_load(f) or {}
+        raw = _deep_merge(raw, local_raw)
+        print(f"[config] Loaded local overrides from {local_path}")
 
     def _to_ns(obj):
         if isinstance(obj, dict):

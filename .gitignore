@@ -290,3 +290,12 @@ pyrightconfig.json
 *.webm
 
 # End of https://www.toptal.com/developers/gitignore/api/images,video,macos,python
+
+# Config files (environment-specific, not committed — use *.yaml.example as templates)
+configs/default.yaml
+configs/fast.yaml
+configs/local.yaml
+
+# Runtime outputs
+outputs/
+results/
