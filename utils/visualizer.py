@@ -129,17 +129,30 @@ def save_visualization(
         - Prediction result and routing info
     """
     orig_np = np.array(original_image)
-    attn_full = trace.get("attn_map_full")   # None when DINOv3 disabled
+    attn_full = trace.get("attn_map_full")   # None for GroundingDINO / disabled
     crop_img = trace.get("crop")
     bbox = trace.get("bbox")
-    blobs_bbox = trace.get("blobs_bbox") or []   # individual blob bboxes
+    blobs_bbox = trace.get("blobs_bbox") or []
     route = trace["route"]
     dino_cnt = trace["dino_count"]
+    text_prompt = trace.get("text_prompt")
     gt = str(row.get("answer", "?")).strip().lower()
     is_correct = pred == gt
-    dino_enabled = attn_full is not None
 
-    num_panels = 4 if dino_enabled else 1
+    # Layout mode:
+    #   "attn"       → DINOv3 mode: 4 panels (original+bbox, heatmap, overlay, crop)
+    #   "grounding"  → GroundingDINO mode: 2 panels (original+bbox, crop)
+    #   "disabled"   → no detector: 1 panel (original only)
+    if attn_full is not None:
+        mode = "attn"
+        num_panels = 4
+    elif crop_img is not None:
+        mode = "grounding"
+        num_panels = 2
+    else:
+        mode = "disabled"
+        num_panels = 1
+
     fig = plt.figure(figsize=(5 * num_panels + 2, 10), facecolor="#1a1a2e")
 
     gs = fig.add_gridspec(
@@ -151,53 +164,62 @@ def save_visualization(
 
     ax_text = fig.add_subplot(gs[1, :])
 
-    if dino_enabled:
+    # ── Shared: draw bboxes helper ───────────────────────────────────────────
+    def _draw_bboxes(ax, title: str):
+        ax.imshow(orig_np)
+        draw_bboxes = blobs_bbox if blobs_bbox else ([bbox] if bbox else [])
+        for bx1, by1, bx2, by2 in draw_bboxes:
+            ax.add_patch(patches.Rectangle(
+                (bx1, by1), bx2 - bx1, by2 - by1,
+                linewidth=2, edgecolor="#ff4444", facecolor="none",
+            ))
+        n = len(draw_bboxes)
+        label = f"{title} ({n}개)" if n > 1 else title
+        ax.set_title(label, color="white", fontsize=9, pad=4)
+        ax.axis("off")
+
+    if mode == "attn":
         ax1 = fig.add_subplot(gs[0, 0])
         ax2 = fig.add_subplot(gs[0, 1])
         ax3 = fig.add_subplot(gs[0, 2])
         ax4 = fig.add_subplot(gs[0, 3])
 
-        # ── Panel 1: Original + individual blob bboxes ───────────────────────
-        ax1.imshow(orig_np)
-        draw_bboxes = blobs_bbox if blobs_bbox else ([bbox] if bbox else [])
-        for bx1, by1, bx2, by2 in draw_bboxes:
-            rect = patches.Rectangle(
-                (bx1, by1), bx2 - bx1, by2 - by1,
-                linewidth=2, edgecolor="#ff4444", facecolor="none",
-            )
-            ax1.add_patch(rect)
-        n_blobs = len(draw_bboxes)
-        bbox_label = f"원본 이미지 + ROI bbox ({n_blobs}개)" if n_blobs > 1 else "원본 이미지 + ROI bbox"
-        ax1.set_title(bbox_label, color="white", fontsize=9, pad=4)
-        ax1.axis("off")
+        _draw_bboxes(ax1, "원본 이미지 + ROI bbox")
 
-        # ── Panel 2: Attention heatmap (normalized) ───────────────────────────
         attn_norm_vis = (attn_full - attn_full.min()) / (attn_full.max() - attn_full.min() + 1e-8)
         ax2.imshow(attn_norm_vis, cmap="jet", interpolation="bilinear")
         ax2.set_title("Attention Heatmap", color="white", fontsize=9, pad=4)
         ax2.axis("off")
 
-        # ── Panel 3: Overlay ──────────────────────────────────────────────────
-        attn_norm = (attn_full - attn_full.min()) / (attn_full.max() - attn_full.min() + 1e-8)
         cmap = plt.colormaps["jet"]
-        heat_rgba = cmap(attn_norm)
+        heat_rgba = cmap(attn_norm_vis)
         heat_rgb = (heat_rgba[:, :, :3] * 255).astype(np.uint8)
         overlay = (orig_np.astype(float) * 0.55 + heat_rgb.astype(float) * 0.45).clip(0, 255).astype(np.uint8)
         ax3.imshow(overlay)
         ax3.set_title("Attention Overlay", color="white", fontsize=9, pad=4)
         ax3.axis("off")
 
-        # ── Panel 4: Crop ─────────────────────────────────────────────────────
         ax4.imshow(np.array(crop_img))
         crop_label = "Crop (원본 사용)" if trace.get("used_full") else "ROI Crop"
         ax4.set_title(crop_label, color="white", fontsize=9, pad=4)
         ax4.axis("off")
 
+    elif mode == "grounding":
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax2 = fig.add_subplot(gs[0, 1])
+
+        prompt_label = f'"{text_prompt}"' if text_prompt else ""
+        _draw_bboxes(ax1, f"GroundingDINO {prompt_label}")
+
+        ax2.imshow(np.array(crop_img))
+        crop_label = "Crop (원본 사용)" if trace.get("used_full") else "ROI Crop"
+        ax2.set_title(crop_label, color="white", fontsize=9, pad=4)
+        ax2.axis("off")
+
     else:
-        # DINOv3 disabled: single panel with original image only
         ax1 = fig.add_subplot(gs[0, 0])
         ax1.imshow(orig_np)
-        ax1.set_title("원본 이미지 (DINOv3 비활성화)", color="white", fontsize=9, pad=4)
+        ax1.set_title("원본 이미지 (detector 비활성화)", color="white", fontsize=9, pad=4)
         ax1.axis("off")
 
     # ── Text panel ───────────────────────────────────────────────────────────
@@ -207,30 +229,26 @@ def save_visualization(
     q_text = str(row.get("question", ""))
     choices = {k: str(row.get(k, "")) for k in "abcd"}
 
-    # Build choices string with markers
     choice_parts = []
     for k, v in choices.items():
         if k == gt and k == pred:
             marker = " ✓"
-            color_tag = "✓"
         elif k == gt:
             marker = " ←정답"
-            color_tag = ""
         elif k == pred:
             marker = " ←예측"
-            color_tag = ""
         else:
             marker = ""
-            color_tag = ""
         choice_parts.append(f"{k}) {v}{marker}")
 
     choices_str = "    ".join(choice_parts)
 
-    route_str = (
-        f"dino_count({dino_cnt}개 추정) → {pred}"
-        if route == "dino_count"
-        else f"qwen_with_crop → {pred}"
-    )
+    if route == "grounding_count":
+        route_str = f"grounding_count({dino_cnt}개 감지, prompt={text_prompt}) → {pred}"
+    elif route == "qwen_with_crop":
+        route_str = f"qwen_with_crop(prompt={text_prompt}) → {pred}"
+    else:
+        route_str = f"qwen_only → {pred}"
     result_str = f"예측: {pred}  |  정답: {gt}  |  {'✓ 정답' if is_correct else '✗ 오답'}"
 
     full_text = (

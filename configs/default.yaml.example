@@ -49,14 +49,12 @@ evaluation:
   max_new_tokens: 5
 
 dino:
-  enabled: true               # false: DINOv3 not loaded; Qwen handles all questions with original image only
-  attention_threshold: 0.6    # binarization threshold for attention map
-  min_blob_size: 50           # minimum pixel area to count as a blob
-  reference_dir: null         # path to reference gallery dir; null = attention mode
-  similarity_threshold: 0.75  # cosine similarity threshold for reference-based counting
-  min_region_size: 30         # minimum pixel area for similarity map blobs
-  crop_padding: 20            # pixels of padding around attention bbox
-  crop_min_size: 64           # minimum crop size in pixels; fallback to full image if smaller
+  enabled: true                                    # false: detector not loaded; Qwen uses original image only
+  model_name: "IDEA-Research/grounding-dino-tiny"  # or grounding-dino-base for higher accuracy
+  box_threshold: 0.25          # detection confidence threshold
+  text_threshold: 0.20         # text-image matching threshold
+  crop_padding: 20             # pixels of padding around union bbox
+  crop_min_size: 64            # minimum crop size; fallback to full image if smaller
 
 visualization:
   enabled: true

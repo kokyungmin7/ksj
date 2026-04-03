@@ -48,12 +48,10 @@ evaluation:
   max_new_tokens: 5
 
 dino:
-  enabled: true               # false: DINOv3 not loaded; Qwen handles all questions with original image only
-  attention_threshold: 0.6
-  min_blob_size: 50
-  reference_dir: null
-  similarity_threshold: 0.75
-  min_region_size: 30
+  enabled: true
+  model_name: "IDEA-Research/grounding-dino-tiny"
+  box_threshold: 0.25
+  text_threshold: 0.20
   crop_padding: 20
   crop_min_size: 64
 

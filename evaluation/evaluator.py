@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from data.dataset import load_and_split
 from models.qwen import load_finetuned_qwen, load_base_qwen
-from models.dino import load_dino
+from models.grounding_dino import load_grounding_dino
 from pipeline.predictor import Predictor
 from utils.visualizer import save_visualization
 
@@ -40,10 +40,10 @@ def run_evaluation(
 
     dino_enabled = getattr(cfg.dino, "enabled", True)
     if dino_enabled:
-        print("Loading DINOv3 ...")
-        dino_model, dino_processor = load_dino(cfg)
+        print("Loading GroundingDINO ...")
+        dino_model, dino_processor = load_grounding_dino(cfg)
     else:
-        print("DINOv3 disabled — skipping load.")
+        print("GroundingDINO disabled — skipping load.")
         dino_model, dino_processor = None, None
 
     predictor = Predictor(

@@ -8,31 +8,31 @@ from PIL import Image
 
 from pipeline.router import is_counting_question
 from models.qwen import qwen_predict, qwen_predict_with_crop
-from models.dino import (
-    get_attention_crop,
-    dino_count,
+from models.grounding_dino import (
+    get_grounding_crop,
+    grounding_count,
     pick_answer_by_count,
-    load_reference_paths,
+    extract_object_noun,
 )
 
 
 class Predictor:
-    """Routes each sample through DINOv3 crop → Qwen3-VL or DINOv3 count.
+    """Routes each sample through GroundingDINO crop → Qwen3-VL or GroundingDINO count.
 
-    If cfg.dino.enabled is False, DINOv3 is not used at all:
+    If cfg.dino.enabled is False, GroundingDINO is not used:
     - No crop is generated
     - All questions go directly to Qwen with the original image
-    - trace will contain None for all DINOv3-related fields
+    - trace will contain None for all detection-related fields
     """
 
     def __init__(
         self,
         qwen_model,
         qwen_processor,
-        dino_model,           # None when cfg.dino.enabled is False
-        dino_processor,       # None when cfg.dino.enabled is False
+        dino_model,        # GroundingDINO model (or None)
+        dino_processor,    # GroundingDINO processor (or None)
         cfg: SimpleNamespace,
-        reference_dir: str | None = None,
+        reference_dir: str | None = None,  # unused with GroundingDINO, kept for CLI compat
     ) -> None:
         self.qwen_model = qwen_model
         self.qwen_processor = qwen_processor
@@ -40,12 +40,6 @@ class Predictor:
         self.dino_processor = dino_processor
         self.cfg = cfg
         self.dino_enabled = getattr(cfg.dino, "enabled", True)
-
-        self.reference_paths: list[str] | None = None
-        if self.dino_enabled:
-            ref_dir = reference_dir or cfg.dino.reference_dir
-            if ref_dir:
-                self.reference_paths = load_reference_paths(ref_dir)
 
     def predict(self, row: dict) -> str:
         """Return predicted answer letter (a/b/c/d)."""
@@ -56,21 +50,22 @@ class Predictor:
         """Return (answer, trace) with all intermediate results.
 
         trace keys:
-            route          str        "dino_count" | "qwen_with_crop" | "qwen_only"
-            bbox           tuple|None (x1, y1, x2, y2); None if dino disabled
-            attn_map       ndarray|None
-            attn_map_full  ndarray|None
+            route          str        "grounding_count" | "qwen_with_crop" | "qwen_only"
+            bbox           tuple|None union bbox (x1,y1,x2,y2); None if disabled
+            blobs_bbox     list       individual detection boxes
+            attn_map       None       compat placeholder
+            attn_map_full  None       compat placeholder
             crop           PIL.Image|None
             used_full      bool|None
             dino_count     int|None
+            text_prompt    str|None   object noun used as GroundingDINO prompt
             raw_answer     str
         """
         if not self.dino_enabled:
             return self._predict_qwen_only(row)
-        return self._predict_with_dino(row)
+        return self._predict_with_grounding(row)
 
     def _predict_qwen_only(self, row: dict) -> tuple[str, dict]:
-        """Qwen inference on original image only (DINOv3 disabled)."""
         answer = qwen_predict(
             self.qwen_model,
             self.qwen_processor,
@@ -87,46 +82,47 @@ class Predictor:
             "crop": None,
             "used_full": None,
             "dino_count": None,
+            "text_prompt": None,
             "raw_answer": answer,
         }
         return answer, trace
 
-    def _predict_with_dino(self, row: dict) -> tuple[str, dict]:
-        """DINOv3 crop + routing logic."""
+    def _predict_with_grounding(self, row: dict) -> tuple[str, dict]:
         image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))
         image = Image.open(image_path).convert("RGB")
 
-        # Step 1: extract attention crop
-        crop_result = get_attention_crop(
-            self.dino_model, self.dino_processor, image, self.cfg
+        # Extract object noun from question for GroundingDINO prompt
+        question = str(row["question"])
+        text_prompt = extract_object_noun(question)
+
+        # Step 1: detect objects and build crop
+        crop_result = get_grounding_crop(
+            self.dino_model, self.dino_processor, image, text_prompt, self.cfg
         )
 
         trace: dict = {
             "bbox": crop_result["bbox"],
             "blobs_bbox": crop_result["blobs_bbox"],
-            "attn_map": crop_result["attn_map"],
-            "attn_map_full": crop_result["attn_map_full"],
+            "attn_map": None,
+            "attn_map_full": None,
             "crop": crop_result["crop"],
             "used_full": crop_result["used_full"],
             "dino_count": None,
+            "text_prompt": text_prompt,
             "route": None,
             "raw_answer": None,
         }
 
-        # Step 2: counting questions → DINOv3 count
-        if is_counting_question(str(row["question"])):
-            count = dino_count(
-                self.dino_model,
-                self.dino_processor,
-                image_path,
-                self.cfg,
-                reference_paths=self.reference_paths,
+        # Step 2: counting questions → GroundingDINO count
+        if is_counting_question(question):
+            count = grounding_count(
+                self.dino_model, self.dino_processor, image, text_prompt, self.cfg
             )
             trace["dino_count"] = count
             answer = pick_answer_by_count(count, row)
 
             if answer is not None:
-                trace["route"] = "dino_count"
+                trace["route"] = "grounding_count"
                 trace["raw_answer"] = str(count)
                 return answer, trace
 
