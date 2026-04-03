@@ -302,3 +302,6 @@ results/
 
 # reference
 references/
+
+# Local documentation (분석 문서 등 로컬 전용)
+docs/

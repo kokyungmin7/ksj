@@ -34,10 +34,9 @@ training:
   gradient_accumulation_steps: 4
   learning_rate: 2.0e-4
   lr_scheduler_type: "cosine"
-  warmup_ratio: 0.05
+  warmup_steps: 10
   weight_decay: 0.01
   logging_steps: 5
-  save_steps: 50
   save_total_limit: 1
   bf16: true
   gradient_checkpointing: true

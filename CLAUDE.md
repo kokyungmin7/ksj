@@ -1,3 +1,11 @@
+# 주의사항
+
+## 건드리지 말아야 할 디렉토리
+- `docs/` 폴더는 로컬 전용 분석 문서입니다. **절대 수정하거나 삭제하지 마세요.**
+  - gitignore에 등록되어 있으며, 코드 변경과 무관합니다.
+
+---
+
 # 개발 환경
 
 ## Python 패키지 매니저
@@ -21,7 +29,7 @@
 
 ## 개요
 한국어 재활용 분류 VQA 데이터셋 (train.csv + 이미지 5,072개)에 대해
-Qwen3-VL-8B-Instruct를 QLoRA로 파인튜닝하고, DINOv3로 이미지 ROI crop 및
+Qwen3-VL-8B-Instruct를 QLoRA로 파인튜닝하고, GroundingDINO로 이미지 ROI crop 및
 개수 세기를 보조하는 파이프라인.
 
 ---
@@ -45,7 +53,8 @@ ksj/
 ├── models/
 │   ├── __init__.py
 │   ├── qwen.py                 # Qwen3-VL 로드 + 추론 (원본/crop 2-image)
-│   └── dino.py                 # DINOv3: attention crop + blob counting
+│   ├── dino.py                 # DINOv3: attention crop + blob counting (레거시)
+│   └── grounding_dino.py       # GroundingDINO: text-guided detection + crop + counting
 ├── pipeline/
 │   ├── __init__.py
 │   ├── router.py               # 개수 질문 키워드 판별
@@ -59,6 +68,7 @@ ksj/
 ├── utils/
 │   ├── __init__.py
 │   ├── prompt.py               # 프롬프트 빌더, 정답 추출
+│   ├── ko2en.py                # 한국어 키워드 → 영어 GroundingDINO 프롬프트 변환
 │   └── visualizer.py           # matplotlib 4-패널 시각화
 └── main.py                     # CLI 진입점
 ```
@@ -70,13 +80,15 @@ ksj/
 ```
 이미지 + 질문 + 4지선다
         ↓
-DINOv3 enabled?
-  ├─ Yes →  attention map 추출 → ROI bbox crop
+  한국어 질문 → 영어 키워드 변환 (utils/ko2en.py)
+  예: "플라스틱 병은 몇 개?" → "plastic bottle"
+        ↓
+GroundingDINO enabled?
+  ├─ Yes →  GroundingDINO(영어 프롬프트) → 개별 bbox 탐지 + union crop
   │           ↓
   │         개수 질문? (키워드: 몇 개, 개수, 몇 가지 ...)
-  │           ├─ Yes → dino_count (attention blob / reference similarity)
-  │           │         → pick_answer_by_count → 정답
-  │           │         (숫자 없으면 qwen_with_crop으로 fallback)
+  │           ├─ Yes → bbox 수 = count → pick_answer_by_count → 정답
+  │           │         (선택지에 숫자 없으면 qwen_with_crop으로 fallback)
   │           └─ No  → qwen_predict_with_crop(원본 + crop) → 정답
   └─ No  →  qwen_predict(원본만) → 정답
         ↓
@@ -90,43 +102,44 @@ DINOv3 enabled?
 | 모델 | 용도 | 로드 방식 |
 |---|---|---|
 | Qwen/Qwen3-VL-8B-Instruct | VQA 추론 / QLoRA 학습 | 4-bit NF4 (학습), bfloat16 (평가) |
-| facebook/dinov3-vits16-pretrain-lvd1689m | attention crop + counting | float16, eager (output_attentions 필요) |
-
-> **주의:** DINOv3는 `attn_implementation="eager"` 필수.
-> `sdpa`는 `output_attentions=True`를 지원하지 않아 IndexError 발생.
+| IDEA-Research/grounding-dino-tiny | text-guided detection + counting | device_map="auto" |
 
 ---
 
-## DINOv3 Counting 방식
+## GroundingDINO Counting 방식
 
-### 기본: Attention Blob Counting
 ```
-attention map (14×14) → bilinear upsample → threshold binarization
-→ scipy.ndimage.label → blob 수 = 개수
-```
-
-### 확장: Reference-based Similarity Counting (`--reference-dir` 지정 시)
-```
-참조 이미지 patch features 평균 → 쿼리 이미지와 코사인 유사도 맵
-→ threshold → blob 수 = 개수
-(blob 0개면 attention 방식으로 fallback)
+한국어 질문 → 영어 키워드 (ko2en)
+→ GroundingDINO(영어 프롬프트) → 개별 bbox 탐지
+→ bbox 수 = count → pick_answer_by_count → 정답
 ```
 
-### 공통 Fallback
+### Fallback
 - 선택지에 숫자가 없으면 → Qwen3-VL로 fallback
 
 ---
 
-## DINOv3 Attention Crop 방식
+## GroundingDINO Crop 방식
 
 ```
-attention map → bilinear upsample (원본 크기)
-→ threshold binary mask → ndimage.find_objects → bbox
-→ crop_padding(20px) 추가 → crop
+GroundingDINO(영어 프롬프트) → 개별 bbox 탐지
+→ union bbox + crop_padding(20px) → crop
 (crop < crop_min_size(64px)이면 원본 전체 사용)
 ```
 
 모든 질문에 적용. crop은 Qwen3-VL 프롬프트에 두 번째 이미지로 전달.
+
+---
+
+## 한국어 → 영어 변환 (utils/ko2en.py)
+
+```
+질문에서 물품 키워드 추출 → 영어 GroundingDINO 프롬프트 변환
+예: "사진에 보이는 플라스틱 병은 몇 개?" → "plastic bottle"
+    "사진 속 흰색 텀블러의 재질은?" → "white tumbler"
+```
+
+3단계 fallback: 원문 longest match → prefix/suffix 제거 후 재매칭 → 선택지에서 힌트
 
 ---
 
