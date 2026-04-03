@@ -299,3 +299,6 @@ configs/local.yaml
 # Runtime outputs
 outputs/
 results/
+
+# reference
+references/
