@@ -56,14 +56,6 @@ dino:
   crop_padding: 20             # pixels of padding around union bbox
   crop_min_size: 64            # minimum crop size; fallback to full image if smaller
 
-sam:
-  enabled: true
-  model_name: "facebook/sam-vit-base"  # sam-vit-large for higher accuracy
-  grid_size: 8          # NxN grid points over the crop (8x8 = 64 points)
-  min_mask_area: 0.02   # min fraction of crop area (removes tiny noise masks)
-  max_mask_area: 0.90   # max fraction of crop area (removes background masks)
-  iou_threshold: 0.5    # NMS IoU threshold for deduplication
-  chunk_size: 16        # SAM inference batch size (reduce if OOM)
 
 visualization:
   enabled: true

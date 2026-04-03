@@ -121,67 +121,16 @@ def get_grounding_crop(
 
 # ── Korean noun extraction & translation ──────────────────────────────────────
 
-# Longest-match first (sorted in extract_object_noun)
-_KO_EN: dict[str, str] = {
-    "발포 스티로폼 상자": "styrofoam box",
-    "발포 스티로폼": "styrofoam",
-    "스티로폼 상자": "styrofoam box",
-    "스티로폼": "styrofoam",
-    "페트병": "PET bottle",
-    "음료 페트": "beverage PET bottle",
-    "페트": "plastic bottle",
-    "음료캔": "beverage can",
-    "철캔": "steel can",
-    "알루미늄캔": "aluminum can",
-    "캔": "can",
-    "골판지": "cardboard",
-    "종이류": "paper",
-    "종이팩": "paper pack",
-    "종이": "paper",
-    "유리병": "glass bottle",
-    "유리": "glass",
-    "플라스틱병": "plastic bottle",
-    "플라스틱": "plastic",
-    "비닐봉지": "plastic bag",
-    "비닐": "plastic bag",
-    "재활용품": "recyclable item",
-    "쓰레기": "trash",
-    "병": "bottle",
-}
+def extract_object_noun(question: str, row: dict | None = None) -> str:
+    """Extract the object noun from a Korean question and translate to English.
 
-_COUNTING_SPLIT = re.compile(
-    r"몇\s*개|개수|몇\s*가지|몇\s*종류|몇\s*번|몇\s*마리|몇"
-)
-_PARTICLES = re.compile(r"[은는이가을를의에서으로로이고이며]+$")
-
-
-def extract_object_noun(question: str) -> str:
-    """Extract the object noun phrase from a Korean question and translate to English.
-
-    Examples:
-        "발포 스티로폼 상자는 몇 개입니까?" → "styrofoam box"
-        "페트병의 개수는?"              → "PET bottle"
-        "사진 속 캔은 몇 개인가요?"     → "can"
+    Delegates to utils.ko2en which has comprehensive vocabulary + parsing.
     """
-    # Split at the first counting keyword
-    parts = _COUNTING_SPLIT.split(question, maxsplit=1)
-    text = parts[0].strip()
+    from utils.ko2en import extract_grounding_prompt, extract_grounding_prompt_from_row
 
-    # Remove trailing Korean particles
-    text = _PARTICLES.sub("", text).strip()
-
-    # Remove common leading phrases
-    for prefix in ["사진에 보이는 재활용품 중", "사진에 보이는", "사진 속", "사진에서"]:
-        if text.startswith(prefix):
-            text = text[len(prefix):].strip()
-
-    # Translate: try longest match first
-    for ko, en in sorted(_KO_EN.items(), key=lambda x: -len(x[0])):
-        if ko in text:
-            return en
-
-    # Fallback: return Korean (GroundingDINO's BERT tokenizer has partial Korean support)
-    return text.strip()
+    if row is not None:
+        return extract_grounding_prompt_from_row(row)
+    return extract_grounding_prompt(question)
 
 
 def pick_answer_by_count(count: int, row: dict) -> str | None:

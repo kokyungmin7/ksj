@@ -13,17 +13,15 @@ from models.grounding_dino import (
     pick_answer_by_count,
     extract_object_noun,
 )
-from models.sam import count_instances_sam
 
 
 class Predictor:
-    """Routes each sample through GroundingDINO crop + SAM count → Qwen3-VL.
+    """Routes each sample through GroundingDINO → count or Qwen.
 
     Counting flow:
-        GroundingDINO detects object region (bbox)
-        → SAM generates individual instance masks within bbox
-        → mask count → pick_answer_by_count
-        → fallback to Qwen with crop if count == 0
+        GroundingDINO detects individual objects (bbox)
+        → bbox count → pick_answer_by_count
+        → fallback to Qwen with crop if no numeric choices
 
     Non-counting flow:
         GroundingDINO crop → Qwen with crop
@@ -37,17 +35,12 @@ class Predictor:
         qwen_processor,
         dino_model,
         dino_processor,
-        sam_model,
-        sam_processor,
         cfg: SimpleNamespace,
-        reference_dir: str | None = None,  # unused, kept for CLI compat
     ) -> None:
         self.qwen_model = qwen_model
         self.qwen_processor = qwen_processor
         self.dino_model = dino_model
         self.dino_processor = dino_processor
-        self.sam_model = sam_model
-        self.sam_processor = sam_processor
         self.cfg = cfg
         self.dino_enabled = getattr(cfg.dino, "enabled", True)
 
@@ -66,7 +59,7 @@ class Predictor:
             attn_map_full None  (compat placeholder)
             crop          PIL.Image | None
             used_full     bool | None
-            dino_count    int | None   (SAM mask count for counting questions)
+            dino_count    int | None
             text_prompt   str | None
             raw_answer    str
         """
@@ -96,12 +89,10 @@ class Predictor:
     def _predict_with_grounding(self, row: dict) -> tuple[str, dict]:
         image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))
         image = Image.open(image_path).convert("RGB")
-        orig_w, orig_h = image.width, image.height
 
         question = str(row["question"])
-        text_prompt = extract_object_noun(question)
+        text_prompt = extract_object_noun(question, row)
 
-        # Step 1: detect object region and build crop
         crop_result = get_grounding_crop(
             self.dino_model, self.dino_processor, image, text_prompt, self.cfg
         )
@@ -119,29 +110,16 @@ class Predictor:
             "raw_answer": None,
         }
 
-        # Step 2: counting → SAM instance counting within the detected bbox
         if is_counting_question(question):
-            bbox = crop_result["bbox"]
-            has_tight_bbox = bbox != (0, 0, orig_w, orig_h)
-
-            if self.sam_model is not None and has_tight_bbox:
-                count = count_instances_sam(
-                    self.sam_model, self.sam_processor, image, bbox, self.cfg
-                )
-            else:
-                # Fallback: use number of GroundingDINO boxes (may be 1 for stacked)
-                count = len(crop_result["blobs_bbox"]) or 1
-
+            count = len(crop_result["blobs_bbox"])
             trace["dino_count"] = count
-            answer = pick_answer_by_count(count, row)
 
+            answer = pick_answer_by_count(count, row)
             if answer is not None:
                 trace["route"] = "grounding_count"
                 trace["raw_answer"] = str(count)
                 return answer, trace
-            # count == 0 or no numeric choices → fall through to Qwen
 
-        # Step 3: Qwen with original + crop
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             crop_path = tmp.name
             crop_result["crop"].save(crop_path, format="JPEG")

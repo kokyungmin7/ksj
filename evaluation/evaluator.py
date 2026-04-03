@@ -12,7 +12,6 @@ from tqdm import tqdm
 from data.dataset import load_and_split
 from models.qwen import load_finetuned_qwen, load_base_qwen
 from models.grounding_dino import load_grounding_dino
-from models.sam import load_sam
 from pipeline.predictor import Predictor
 from utils.visualizer import save_visualization
 
@@ -26,12 +25,11 @@ def run_evaluation(
 
     Args:
         checkpoint_dir: Path to fine-tuned checkpoint. If None, uses base model.
-        reference_dir: Optional reference gallery for DINOv3 counting.
+        reference_dir: Unused, kept for CLI compat.
 
     Returns:
         Dict with accuracy, per_class accuracy, and per-sample results.
     """
-    # Load models
     if checkpoint_dir:
         print(f"Loading fine-tuned model from {checkpoint_dir} ...")
         qwen_model, qwen_processor = load_finetuned_qwen(checkpoint_dir, cfg)
@@ -47,21 +45,10 @@ def run_evaluation(
         print("GroundingDINO disabled — skipping load.")
         dino_model, dino_processor = None, None
 
-    sam_cfg = getattr(cfg, "sam", None)
-    sam_enabled = dino_enabled and sam_cfg is not None and getattr(sam_cfg, "enabled", False)
-    if sam_enabled:
-        print("Loading SAM ...")
-        sam_model, sam_processor = load_sam(cfg)
-    else:
-        print("SAM disabled — counting will use GroundingDINO bbox count.")
-        sam_model, sam_processor = None, None
-
     predictor = Predictor(
         qwen_model, qwen_processor,
         dino_model, dino_processor,
-        sam_model, sam_processor,
         cfg,
-        reference_dir=reference_dir,
     )
 
     _, val_df = load_and_split(cfg)
@@ -97,7 +84,6 @@ def run_evaluation(
             "dino_count": trace["dino_count"],
         })
 
-        # Visualization
         should_viz = (
             viz_enabled
             and (idx % save_every == 0)
@@ -111,7 +97,6 @@ def run_evaluation(
             save_visualization(original_image, trace, row_dict, pred, out_path)
             viz_count += 1
 
-    # Metrics
     accuracy = sum(p == g for p, g in zip(predictions, ground_truths)) / len(predictions)
 
     per_class: dict[str, dict] = defaultdict(lambda: {"correct": 0, "total": 0})
@@ -125,7 +110,6 @@ def run_evaluation(
         for cls, d in sorted(per_class.items())
     }
 
-    # Route breakdown
     route_counts: dict[str, int] = defaultdict(int)
     for s in samples:
         route_counts[s["route"] or "unknown"] += 1
