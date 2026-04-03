@@ -71,6 +71,18 @@ def _model_device(model: torch.nn.Module) -> torch.device:
     return next(model.parameters()).device
 
 
+def _batch_to_model_dtype(batch, model: torch.nn.Module) -> object:
+    """SamProcessor 등이 float32를 주면 FP16 모델과 conv dtype이 어긋난다."""
+    dev = _model_device(model)
+    dt = next(model.parameters()).dtype
+    batch = batch.to(dev)
+    for k in list(batch.keys()):
+        v = batch[k]
+        if torch.is_tensor(v) and v.is_floating_point():
+            batch[k] = v.to(dtype=dt)
+    return batch
+
+
 def load_gdino(quant: str = "8"):
     print(f"Loading GroundingDINO ({GDINO_MODEL})  quant={quant} ...")
     processor = AutoProcessor.from_pretrained(GDINO_MODEL)
@@ -172,11 +184,14 @@ def sam_count(sam_model, sam_processor, image, bbox, cfg=SAM_CFG):
     candidate_masks = []
     for start in range(0, len(grid_points), cfg.chunk_size):
         chunk = grid_points[start: start + cfg.chunk_size]
-        inputs = sam_processor(
-            images=[crop] * len(chunk),
-            input_points=[[[p]] for p in chunk],
-            return_tensors="pt",
-        ).to(_model_device(sam_model))
+        inputs = _batch_to_model_dtype(
+            sam_processor(
+                images=[crop] * len(chunk),
+                input_points=[[[p]] for p in chunk],
+                return_tensors="pt",
+            ),
+            sam_model,
+        )
 
         outputs = sam_model(**inputs)
         masks_np = sam_processor.post_process_masks(
