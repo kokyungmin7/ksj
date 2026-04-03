@@ -61,12 +61,13 @@ ksj/
 │   └── predictor.py            # 라우팅 + predict_with_trace()
 ├── training/
 │   ├── __init__.py
-│   └── trainer.py              # QLoRA SFTTrainer
+│   └── trainer.py              # QLoRA SFTTrainer + 오답 분석 콜백
 ├── evaluation/
 │   ├── __init__.py
 │   └── evaluator.py            # val 평가 + 시각화 저장 + JSON 결과
 ├── utils/
 │   ├── __init__.py
+│   ├── error_analysis.py       # epoch별 오답 분석 + 학습 종료 시 종합 요약 시각화
 │   ├── prompt.py               # 프롬프트 빌더, 정답 추출
 │   ├── ko2en.py                # 한국어 키워드 → 영어 GroundingDINO 프롬프트 변환
 │   └── visualizer.py           # matplotlib 4-패널 시각화
@@ -218,6 +219,33 @@ DINOv3 비활성화 시: 원본 이미지 1패널만 출력.
 
 ---
 
+## 학습 실행별 출력 구조
+
+매 학습 실행마다 타임스탬프 기반 폴더가 자동 생성되어 이전 결과를 덮어쓰지 않는다.
+
+```
+outputs/qwen35-lora/
+├── run_20260404_153000/          # 첫 번째 학습
+│   ├── checkpoint-xxx/           # 모델 체크포인트
+│   ├── runs/                     # TensorBoard 로그
+│   ├── analysis/                 # 오답 분석
+│   │   ├── epoch_1/
+│   │   │   ├── wrong_predictions.json
+│   │   │   └── wrong_grid.png
+│   │   ├── epoch_2/
+│   │   │   └── ...
+│   │   └── summary/
+│   │       ├── training_curves.png    # Accuracy & F1 추이
+│   │       ├── confusion_matrix.png   # 혼동 행렬
+│   │       └── error_analysis.png     # 오답 패턴 분석
+│   ├── adapter_config.json
+│   └── adapter_model.safetensors
+├── run_20260404_170000/          # 두 번째 학습 (덮어쓰지 않음)
+│   └── ...
+```
+
+---
+
 ## 실행 명령
 
 ```bash
@@ -233,8 +261,8 @@ uv run main.py train --config configs/fast.yaml
 # 전체 학습
 uv run main.py train
 
-# fine-tuned 모델 평가
-uv run main.py evaluate --checkpoint outputs/qwen35-lora
+# fine-tuned 모델 평가 (run 디렉토리 지정)
+uv run main.py evaluate --checkpoint outputs/qwen35-lora/run_YYYYMMDD_HHMMSS
 
 # reference 갤러리 지정
 uv run main.py evaluate --reference-dir data/references/bong/

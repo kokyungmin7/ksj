@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from types import SimpleNamespace
 
 import torch
@@ -21,17 +23,24 @@ from utils.prompt import build_messages, extract_answer
 
 
 class F1EvalCallback(TrainerCallback):
-    """Epoch 종료 시 val subset에서 macro F1 / accuracy를 계산해 TensorBoard에 기록.
+    """Epoch 종료 시 val subset에서 macro F1 / accuracy를 계산하고,
+    오답을 상세 기록하여 시각화까지 수행하는 콜백.
 
-    배치 추론을 사용하여 단건 추론 대비 속도를 크게 개선.
+    학습 종료 시 전체 epoch에 걸친 종합 요약(학습 곡선, 혼동 행렬,
+    오답 패턴 분석)을 자동 생성한다.
     """
 
-    def __init__(self, val_df, processor, cfg: SimpleNamespace) -> None:
+    def __init__(
+        self, val_df, processor, cfg: SimpleNamespace, run_dir: str,
+    ) -> None:
         self.val_df = val_df
         self.processor = processor
         self.cfg = cfg
         self.batch_size = getattr(cfg.training, "f1_eval_batch_size", 4)
+        self.run_dir = run_dir
+        self.analysis_dir = os.path.join(run_dir, "analysis")
         self.writer = None
+        self.epoch_records: list[dict] = []
 
     def on_train_begin(
         self,
@@ -112,16 +121,28 @@ class F1EvalCallback(TrainerCallback):
         model.config.use_cache = True
         model.eval()
 
-        preds, gts = [], []
+        preds, gts, all_results = [], [], []
         rows = [row.to_dict() for _, row in df.iterrows()]
 
         for i in range(0, len(rows), self.batch_size):
             batch_rows = rows[i : i + self.batch_size]
             batch_preds = self._batch_predict(model, batch_rows)
             preds.extend(batch_preds)
-            gts.extend(
-                str(r["answer"]).strip().lower() for r in batch_rows
-            )
+            for r, p in zip(batch_rows, batch_preds):
+                gt = str(r["answer"]).strip().lower()
+                gts.append(gt)
+                all_results.append({
+                    "id": str(r.get("id", "")),
+                    "question": str(r.get("question", "")),
+                    "a": str(r.get("a", "")),
+                    "b": str(r.get("b", "")),
+                    "c": str(r.get("c", "")),
+                    "d": str(r.get("d", "")),
+                    "path": str(r.get("path", "")),
+                    "ground_truth": gt,
+                    "predicted": p,
+                    "correct": p == gt,
+                })
 
         model.config.use_cache = prev_use_cache
         model.train()
@@ -129,16 +150,32 @@ class F1EvalCallback(TrainerCallback):
         labels = ["a", "b", "c", "d"]
         f1 = f1_score(gts, preds, labels=labels, average="macro", zero_division=0)
         acc = sum(p == g for p, g in zip(preds, gts)) / len(gts)
+        correct = sum(p == g for p, g in zip(preds, gts))
         epoch = int(state.epoch)
 
         if self.writer:
             self.writer.add_scalar("eval/f1_macro", f1, epoch)
             self.writer.add_scalar("eval/accuracy", acc, epoch)
 
+        wrong_n = len(gts) - correct
         print(
             f"\n[Epoch {epoch}] F1 macro: {f1:.4f}  |  Accuracy: {acc:.4f}"
-            f"  (n={len(gts)})"
+            f"  (n={len(gts)}, 오답 {wrong_n}건)"
         )
+
+        from utils.error_analysis import save_epoch_errors
+        save_epoch_errors(
+            all_results, epoch, self.analysis_dir, self.cfg.data.image_root,
+        )
+
+        self.epoch_records.append({
+            "epoch": epoch,
+            "accuracy": acc,
+            "f1_macro": f1,
+            "total": len(gts),
+            "correct": correct,
+            "all_results": all_results,
+        })
 
     def on_train_end(
         self,
@@ -150,12 +187,22 @@ class F1EvalCallback(TrainerCallback):
         if self.writer:
             self.writer.close()
 
+        if self.epoch_records:
+            from utils.error_analysis import save_training_summary
+            save_training_summary(self.epoch_records, self.analysis_dir)
+            print(f"[analysis] 오답 분석 저장 완료: {self.analysis_dir}")
+
 
 def run_training(cfg: SimpleNamespace) -> None:
     """Fine-tune Qwen3.5 with QLoRA on the training split."""
-    model, processor = load_qwen(cfg)
 
-    # Enable grad for frozen base model (required for gradient checkpointing + PEFT)
+    # Timestamped run directory — 이전 학습 결과를 덮어쓰지 않음
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(cfg.training.output_dir, f"run_{run_ts}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"[run] 출력 디렉토리: {run_dir}")
+
+    model, processor = load_qwen(cfg)
     model.enable_input_require_grads()
 
     lora_config = LoraConfig(
@@ -179,7 +226,7 @@ def run_training(cfg: SimpleNamespace) -> None:
     collator = VQADataCollator(processor, cfg.training.max_seq_length, enable_thinking=enable_thinking)
 
     training_args = SFTConfig(
-        output_dir=cfg.training.output_dir,
+        output_dir=run_dir,
         num_train_epochs=cfg.training.num_train_epochs,
         per_device_train_batch_size=cfg.training.per_device_train_batch_size,
         per_device_eval_batch_size=cfg.training.per_device_train_batch_size,
@@ -205,7 +252,7 @@ def run_training(cfg: SimpleNamespace) -> None:
     )
 
     patience = getattr(cfg.training, "early_stopping_patience", 2)
-    f1_callback = F1EvalCallback(val_df, processor, cfg)
+    f1_callback = F1EvalCallback(val_df, processor, cfg, run_dir)
 
     trainer = SFTTrainer(
         model=model,
@@ -220,6 +267,6 @@ def run_training(cfg: SimpleNamespace) -> None:
     )
 
     trainer.train()
-    trainer.save_model(cfg.training.output_dir)
-    processor.save_pretrained(cfg.training.output_dir)
-    print(f"Saved to {cfg.training.output_dir}")
+    trainer.save_model(run_dir)
+    processor.save_pretrained(run_dir)
+    print(f"[run] 학습 완료. 모델 저장: {run_dir}")
