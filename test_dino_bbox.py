@@ -8,10 +8,11 @@ Usage:
 Output:
     test_dino_bbox_result.png  — 3-panel: original+bboxes | union crop | SAM masks
 
-VRAM (L4 24GB 등): 기본 8bit 양자화 + GDINO 추론 후 SAM만 로드(순차 로딩).
-    --quant 8   # 기본, bitsandbytes 8bit
-    --quant 4   # NF4 4bit (더 절약, 품질 소폭 저하 가능)
-    --quant none  # FP16 (메모리 여유 있을 때)
+VRAM (L4 24GB 등): GroundingDINO만 bitsandbytes 양자화 + 추론 후 SAM 로드(순차).
+    SAM은 attention에 4D 텐서가 들어가 bnb Linear와 호환되지 않아 항상 FP16.
+    --quant 8   # GDINO 8bit (기본)
+    --quant 4   # GDINO NF4
+    --quant none  # GDINO도 FP16
 """
 from __future__ import annotations
 
@@ -87,16 +88,13 @@ def load_gdino(quant: str = "8"):
     return model, processor
 
 
-def load_sam_model(quant: str = "8"):
-    print(f"Loading SAM ({SAM_MODEL})  quant={quant} ...")
+def load_sam_model():
+    # bitsandbytes 8bit/4bit Linear는 2D/3D 입력만 지원. SAM ViT qkv는 4D → RuntimeError.
+    print(f"Loading SAM ({SAM_MODEL})  dtype=fp16 (no bnb) ...")
     processor = SamProcessor.from_pretrained(SAM_MODEL)
-    qcfg = _bnb_config(quant)
-    kwargs: dict = {"device_map": "auto"}
-    if qcfg is not None:
-        kwargs["quantization_config"] = qcfg
-    else:
-        kwargs["torch_dtype"] = torch.float16
-    model = SamModel.from_pretrained(SAM_MODEL, **kwargs)
+    model = SamModel.from_pretrained(
+        SAM_MODEL, device_map="auto", torch_dtype=torch.float16
+    )
     model.eval()
     print(f"  device: {_model_device(model)}")
     return model, processor
@@ -262,7 +260,7 @@ def main():
         "--quant",
         choices=("none", "4", "8"),
         default="8",
-        help="bitsandbytes: 8=8bit (default), 4=NF4, none=FP16",
+        help="GroundingDINO only: 8=8bit, 4=NF4, none=FP16 (SAM은 항상 FP16)",
     )
     parser.add_argument("--output", default=OUTPUT_PATH)
     args = parser.parse_args()
@@ -302,7 +300,7 @@ def main():
         print(f"  union bbox: {union_bbox}")
 
         print("\n[2] SAM instance counting ...")
-        sam_model, sam_proc = load_sam_model(args.quant)
+        sam_model, sam_proc = load_sam_model()
         count, kept_masks, crop_img = sam_count(sam_model, sam_proc, image, union_bbox)
         print(f"  Final count: {count}")
     else:
