@@ -3,6 +3,7 @@ model:
   dino_name: "facebook/dinov3-vits16-pretrain-lvd1689m"
   torch_dtype: "bfloat16"
   attn_implementation: "flash_attention_2"  # "eager" if flash_attn not installed
+  device: "cuda"  # device_map for evaluation; "cuda" or "cuda:0"
 
 data:
   csv_path: "train.csv"
