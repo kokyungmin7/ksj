@@ -23,16 +23,15 @@ from scipy import ndimage
 from transformers import AutoImageProcessor, AutoModel
 
 
-# ── Config ────────────────────────���───────────���─────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 DINO_MODEL = "facebook/dinov3-vits16-pretrain-lvd1689m"
 DEFAULT_IMAGE = "train/train_0001.jpg"
 DEFAULT_THRESHOLD = 0.6   # top 60% attention mass → foreground
 MIN_BLOB_SIZE = 50        # pixels
-CROP_PADDING = 20         # pixels
 OUTPUT_PATH = "test_dino_bbox_result.png"
 
 
-# ── Core functions ─────────────────────────────��─────────────────────────────
+# ── Core functions ────────────────────────────────────────────────────────────
 
 def load_model():
     print(f"Loading DINOv3 from {DINO_MODEL} ...")
@@ -52,27 +51,40 @@ def load_model():
 
 @torch.inference_mode()
 def get_attention_map(model, processor, image: Image.Image):
-    """Return raw CLS→patch attention map (num_h, num_w) and image size."""
+    """Return per-head and mean CLS→patch attention maps, plus image size."""
     inputs = processor(images=image, return_tensors="pt").to(model.device)
+
+    # ── Processor input info ──────────────────────────────────────────────────
+    pv = inputs["pixel_values"]
+    _, c, ph, pw = pv.shape
+    print(f"  processor output  pixel_values: {c}ch x {ph}x{pw}  "
+          f"dtype={pv.dtype}  min={pv.min().item():.3f}  max={pv.max().item():.3f}")
+    print(f"  (original image {image.width}x{image.height} -> resized to {pw}x{ph} before model)")
+
     outputs = model(**inputs, output_attentions=True)
 
-    # Debug: print attention tensor info
     attn_last = outputs.attentions[-1][0]  # (num_heads, seq_len, seq_len)
     print(f"  attention shape: {attn_last.shape}")
-    print(f"  attention[-1] min/max/mean: "
+    print(f"  attention min/max/mean: "
           f"{attn_last.min().item():.5f} / {attn_last.max().item():.5f} / {attn_last.mean().item():.5f}")
 
     num_register = getattr(model.config, "num_register_tokens", 0)
     patch_size = model.config.patch_size
-    _, _, h, w = inputs["pixel_values"].shape
-    num_h, num_w = h // patch_size, w // patch_size
+    num_h, num_w = ph // patch_size, pw // patch_size
+    num_heads = attn_last.shape[0]
 
-    cls_attn = attn_last[:, 0, 1 + num_register:].mean(dim=0)  # (num_patches,)
-    attn_map = cls_attn.reshape(num_h, num_w).float().cpu().numpy()
+    # Per-head maps: (num_heads, num_h, num_w)
+    per_head = attn_last[:, 0, 1 + num_register:].float().cpu()  # (H, num_patches)
+    per_head_maps = per_head.reshape(num_heads, num_h, num_w).numpy()
 
-    print(f"  attn_map shape: {attn_map.shape}  "
+    # Mean map
+    attn_map = per_head_maps.mean(axis=0)
+    print(f"  attn_map (mean) shape={attn_map.shape}  "
           f"min={attn_map.min():.5f} max={attn_map.max():.5f} mean={attn_map.mean():.5f}")
-    return attn_map, (image.width, image.height)
+    for i, hmap in enumerate(per_head_maps):
+        print(f"    head {i}  min={hmap.min():.5f} max={hmap.max():.5f} mean={hmap.mean():.5f}")
+
+    return attn_map, per_head_maps, (image.width, image.height)
 
 
 def upsample(attn_map: np.ndarray, w: int, h: int, mode: str = "nearest") -> np.ndarray:
@@ -113,64 +125,89 @@ def find_blobs(binary: np.ndarray, min_blob_size: int, orig_w: int, orig_h: int)
     return blobs
 
 
-# ── Visualization ───────────────────────────────────────────────────���─────────
+# ── Visualization ─────────────────────────────────────────────────────────────
 
-def visualize(image: Image.Image, attn_map: np.ndarray, blobs: list, threshold: float, output_path: str):
+def visualize(
+    image: Image.Image,
+    attn_map: np.ndarray,
+    per_head_maps: np.ndarray,
+    blobs: list,
+    threshold: float,
+    output_path: str,
+):
     orig_np = np.array(image)
     orig_w, orig_h = image.width, image.height
+    num_heads = per_head_maps.shape[0]
 
-    # Smooth bilinear heatmap for display
+    # Mean heatmap (bilinear for display)
     attn_full_vis = upsample(attn_map, orig_w, orig_h, mode="bilinear")
     attn_norm = (attn_full_vis - attn_full_vis.min()) / (attn_full_vis.max() - attn_full_vis.min() + 1e-8)
 
-    # Binary mask (nearest) for display
+    # Binary mask (nearest)
     attn_full_nearest = upsample(attn_map, orig_w, orig_h, mode="nearest")
     binary = mass_threshold(attn_full_nearest, threshold)
 
-    # Overlay
-    cmap = plt.colormaps["jet"]
-    heat_rgba = cmap(attn_norm)
+    # Overlay (mean)
+    cmap_jet = plt.colormaps["jet"]
+    heat_rgba = cmap_jet(attn_norm)
     heat_rgb = (heat_rgba[:, :, :3] * 255).astype(np.uint8)
     overlay = (orig_np.astype(float) * 0.55 + heat_rgb.astype(float) * 0.45).clip(0, 255).astype(np.uint8)
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5), facecolor="#1a1a2e")
-    fig.suptitle(f"DINOv3 Attention Bbox Test  (threshold={threshold}, blobs={len(blobs)})",
-                 color="white", fontsize=11)
+    # Row 0: Original+bboxes | Mean heatmap | Overlay | Binary mask
+    # Row 1: Per-head attention heatmaps (6 heads)
+    ncols = max(4, num_heads)
+    fig = plt.figure(figsize=(5 * ncols, 5 * 2 + 0.6), facecolor="#1a1a2e")
+    fig.suptitle(
+        f"DINOv3  input={orig_w}x{orig_h}  threshold={threshold}  blobs={len(blobs)}",
+        color="white", fontsize=10,
+    )
+    gs = fig.add_gridspec(2, ncols, hspace=0.3, wspace=0.05)
 
-    titles = ["Original + Bboxes", "Attention Heatmap", "Attention Overlay", "Binary Mask"]
-    for ax, title in zip(axes, titles):
-        ax.set_facecolor("#0d0d1a")
-        ax.set_title(title, color="white", fontsize=9)
-        ax.axis("off")
+    def ax_(r, c):
+        a = fig.add_subplot(gs[r, c])
+        a.set_facecolor("#0d0d1a")
+        a.axis("off")
+        return a
 
-    # Panel 1: original + blobs
-    axes[0].imshow(orig_np)
+    # Row 0
+    a0 = ax_(0, 0)
+    a0.imshow(orig_np)
+    a0.set_title("Original + Bboxes (mean)", color="white", fontsize=8)
     for (x1, y1, x2, y2) in blobs:
-        rect = patches.Rectangle(
+        a0.add_patch(patches.Rectangle(
             (x1, y1), x2 - x1, y2 - y1,
             linewidth=2, edgecolor="#ff4444", facecolor="none",
-        )
-        axes[0].add_patch(rect)
+        ))
     if not blobs:
-        axes[0].text(0.5, 0.5, "NO BLOBS DETECTED", transform=axes[0].transAxes,
-                     color="red", ha="center", va="center", fontsize=12)
+        a0.text(0.5, 0.5, "NO BLOBS", transform=a0.transAxes,
+                color="red", ha="center", va="center", fontsize=11)
 
-    # Panel 2: heatmap
-    axes[1].imshow(attn_norm, cmap="jet", interpolation="bilinear")
+    a1 = ax_(0, 1)
+    a1.imshow(attn_norm, cmap="jet", interpolation="bilinear")
+    a1.set_title("Mean Attention Heatmap", color="white", fontsize=8)
 
-    # Panel 3: overlay
-    axes[2].imshow(overlay)
+    a2 = ax_(0, 2)
+    a2.imshow(overlay)
+    a2.set_title("Mean Attention Overlay", color="white", fontsize=8)
 
-    # Panel 4: binary mask
-    axes[3].imshow(binary, cmap="gray")
+    a3 = ax_(0, 3)
+    a3.imshow(binary, cmap="gray")
+    a3.set_title(f"Binary Mask ({binary.mean()*100:.1f}% fg)", color="white", fontsize=8)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    # Row 1: per-head heatmaps
+    for i in range(num_heads):
+        ax = ax_(1, i)
+        hmap = upsample(per_head_maps[i], orig_w, orig_h, mode="bilinear")
+        hn = (hmap - hmap.min()) / (hmap.max() - hmap.min() + 1e-8)
+        ax.imshow(hn, cmap="jet", interpolation="bilinear")
+        ax.set_title(f"Head {i}", color="white", fontsize=8)
+
+    plt.savefig(output_path, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"  Saved → {output_path}")
+    print(f"  Saved -> {output_path}")
 
 
-# ── Main ──────────────────────────��───────────────────────────────���──────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
@@ -191,12 +228,12 @@ def main():
     print(f"Min blob : {args.min_blob_size} px")
 
     image = Image.open(image_path).convert("RGB")
-    print(f"Image size: {image.width} × {image.height}")
+    print(f"Image size: {image.width} x {image.height}")
 
     model, processor = load_model()
 
     print("\n[1] Extracting attention map ...")
-    attn_map, (orig_w, orig_h) = get_attention_map(model, processor, image)
+    attn_map, per_head_maps, (orig_w, orig_h) = get_attention_map(model, processor, image)
 
     print("\n[2] Upsampling & thresholding ...")
     attn_full_nearest = upsample(attn_map, orig_w, orig_h, mode="nearest")
@@ -205,10 +242,10 @@ def main():
     print("\n[3] Finding blobs ...")
     blobs = find_blobs(binary, args.min_blob_size, orig_w, orig_h)
     for i, (x1, y1, x2, y2) in enumerate(blobs):
-        print(f"  blob {i+1}: ({x1},{y1}) → ({x2},{y2})  size={x2-x1}×{y2-y1}")
+        print(f"  blob {i+1}: ({x1},{y1}) -> ({x2},{y2})  size={x2-x1}x{y2-y1}")
 
     print("\n[4] Saving visualization ...")
-    visualize(image, attn_map, blobs, args.threshold, args.output)
+    visualize(image, attn_map, per_head_maps, blobs, args.threshold, args.output)
 
     print("\nDone.")
 
