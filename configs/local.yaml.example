@@ -18,7 +18,7 @@
 
 # 체크포인트 경로가 환경마다 다를 때
 # training:
-#   output_dir: "/mnt/storage/checkpoints/qwen3vl-lora"
+#   output_dir: "/mnt/storage/checkpoints/qwen35-lora"
 
 # flash_attention2 미설치 환경
 # model:

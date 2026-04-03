@@ -1,7 +1,7 @@
 [project]
 name = "ksj"
 version = "0.1.0"
-description = "Korean Recycling VQA with Qwen3-VL + DINOv3"
+description = "Korean Recycling VQA with Qwen3.5 + GroundingDINO"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

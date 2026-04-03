@@ -76,16 +76,17 @@ class KoreanRecyclingVQADataset(Dataset):
 
 
 class VQADataCollator:
-    """Tokenizes a batch of {"messages": [...]} items for Qwen3-VL SFT.
+    """Tokenizes a batch of {"messages": [...]} items for Qwen3.5 SFT.
 
     - Applies the chat template to produce input_ids.
     - Masks all tokens before the assistant turn with -100 so the loss
       is computed only on the single answer token.
     """
 
-    def __init__(self, processor, max_seq_length: int = 1024) -> None:
+    def __init__(self, processor, max_seq_length: int = 1024, enable_thinking: bool = False) -> None:
         self.processor = processor
         self.max_seq_length = max_seq_length
+        self.enable_thinking = enable_thinking
         self._assistant_token_ids: list[int] | None = None
 
     def _get_assistant_token_ids(self) -> list[int]:
@@ -101,11 +102,11 @@ class VQADataCollator:
                 f["messages"],
                 tokenize=False,
                 add_generation_prompt=False,
+                enable_thinking=self.enable_thinking,
             )
             for f in features
         ]
 
-        # Collect images from messages
         images = []
         for f in features:
             for msg in f["messages"]:
@@ -114,7 +115,7 @@ class VQADataCollator:
                 for part in msg["content"]:
                     if part.get("type") == "image":
                         from PIL import Image
-                        path = part["image"].replace("file://", "")
+                        path = str(part["image"]).replace("file://", "")
                         images.append(Image.open(path).convert("RGB"))
 
         batch = self.processor(

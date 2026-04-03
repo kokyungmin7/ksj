@@ -1,12 +1,30 @@
 from __future__ import annotations
 
 import torch
+from PIL import Image
 from types import SimpleNamespace
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor
 from transformers import BitsAndBytesConfig
 from peft import PeftModel
 
 from utils.prompt import build_messages, build_messages_with_crop, extract_answer
+
+
+def _get_enable_thinking(cfg: SimpleNamespace) -> bool:
+    return getattr(cfg.model, "enable_thinking", False)
+
+
+def _extract_images(messages: list[dict]) -> list[Image.Image]:
+    """Extract PIL images from chat messages containing image paths."""
+    images = []
+    for msg in messages:
+        if not isinstance(msg.get("content"), list):
+            continue
+        for part in msg["content"]:
+            if part.get("type") == "image":
+                path = str(part["image"]).replace("file://", "")
+                images.append(Image.open(path).convert("RGB"))
+    return images
 
 
 def _load_processor(name: str, cfg: SimpleNamespace) -> AutoProcessor:
@@ -20,7 +38,7 @@ def _load_processor(name: str, cfg: SimpleNamespace) -> AutoProcessor:
 
 
 def load_qwen(cfg: SimpleNamespace) -> tuple:
-    """Load Qwen3-VL with 4-bit NF4 quantization for QLoRA training."""
+    """Load Qwen3.5-9B with 4-bit NF4 quantization for QLoRA training."""
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -29,7 +47,7 @@ def load_qwen(cfg: SimpleNamespace) -> tuple:
     )
 
     try:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             cfg.model.qwen_name,
             quantization_config=bnb_config,
             attn_implementation=cfg.model.attn_implementation,
@@ -37,8 +55,7 @@ def load_qwen(cfg: SimpleNamespace) -> tuple:
             device_map="auto",
         )
     except Exception:
-        # Fallback: try without flash_attention_2
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             cfg.model.qwen_name,
             quantization_config=bnb_config,
             attn_implementation="eager",
@@ -52,16 +69,16 @@ def load_qwen(cfg: SimpleNamespace) -> tuple:
 
 
 def load_finetuned_qwen(checkpoint_dir: str, cfg: SimpleNamespace) -> tuple:
-    """Load a fine-tuned Qwen3-VL checkpoint with LoRA weights merged."""
+    """Load a fine-tuned Qwen3.5 checkpoint with LoRA weights merged."""
     try:
-        base = Qwen3VLForConditionalGeneration.from_pretrained(
+        base = AutoModelForImageTextToText.from_pretrained(
             cfg.model.qwen_name,
             attn_implementation=cfg.model.attn_implementation,
             torch_dtype=torch.bfloat16,
             device_map="auto",
         )
     except Exception:
-        base = Qwen3VLForConditionalGeneration.from_pretrained(
+        base = AutoModelForImageTextToText.from_pretrained(
             cfg.model.qwen_name,
             attn_implementation="eager",
             torch_dtype=torch.bfloat16,
@@ -81,18 +98,18 @@ def load_finetuned_qwen(checkpoint_dir: str, cfg: SimpleNamespace) -> tuple:
 
 
 def load_base_qwen(cfg: SimpleNamespace) -> tuple:
-    """Load Qwen3-VL base model in bfloat16 for zero-shot evaluation."""
+    """Load Qwen3.5 base model in bfloat16 for zero-shot evaluation."""
     device = getattr(cfg.model, "device", "cuda")
     dtype = torch.bfloat16 if cfg.model.torch_dtype == "bfloat16" else torch.float16
     try:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             cfg.model.qwen_name,
             attn_implementation=cfg.model.attn_implementation,
             torch_dtype=dtype,
             device_map=device,
         )
     except Exception:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             cfg.model.qwen_name,
             attn_implementation="eager",
             torch_dtype=dtype,
@@ -114,14 +131,18 @@ def qwen_predict(
 ) -> str:
     """Run inference on a single row and return the predicted answer letter."""
     messages = build_messages(row, image_root)
+    images = _extract_images(messages)
 
-    inputs = processor.apply_chat_template(
+    text = processor.apply_chat_template(
         messages,
-        tokenize=True,
+        tokenize=False,
         add_generation_prompt=True,
-        return_dict=True,
+        enable_thinking=_get_enable_thinking(cfg),
+    )
+    inputs = processor(
+        text=[text],
+        images=images if images else None,
         return_tensors="pt",
-        truncation=False,
     )
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
@@ -152,16 +173,20 @@ def qwen_predict_with_crop(
     crop_path: str,
     cfg: SimpleNamespace,
 ) -> str:
-    """Run inference using both original image and DINOv3 attention crop."""
+    """Run inference using both original image and GroundingDINO crop."""
     messages = build_messages_with_crop(row, image_root, crop_path)
+    images = _extract_images(messages)
 
-    inputs = processor.apply_chat_template(
+    text = processor.apply_chat_template(
         messages,
-        tokenize=True,
+        tokenize=False,
         add_generation_prompt=True,
-        return_dict=True,
+        enable_thinking=_get_enable_thinking(cfg),
+    )
+    inputs = processor(
+        text=[text],
+        images=images if images else None,
         return_tensors="pt",
-        truncation=False,
     )
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 

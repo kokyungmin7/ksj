@@ -1,11 +1,12 @@
 model:
-  qwen_name: "Qwen/Qwen3-VL-8B-Instruct"
+  qwen_name: "Qwen/Qwen3.5-9B"
   dino_name: "facebook/dinov3-vits16-pretrain-lvd1689m"
   torch_dtype: "bfloat16"
   attn_implementation: "flash_attention_2"  # "eager" if flash_attn not installed
   device: "cuda"  # device_map for evaluation; "cuda" or "cuda:0"
-  min_pixels: 200704   # 256 * 28 * 28 — Qwen3-VL 이미지 토큰 하한
-  max_pixels: 1003520  # 1280 * 28 * 28 — Qwen3-VL 이미지 토큰 상한
+  enable_thinking: false  # Qwen3.5 thinking 모드 비활성화 (VQA 직접 답변용)
+  min_pixels: 200704   # 256 * 28 * 28 — 이미지 토큰 하한
+  max_pixels: 1003520  # 1280 * 28 * 28 — 이미지 토큰 상한
 
 data:
   csv_path: "train.csv"
@@ -29,7 +30,7 @@ lora:
     - "down_proj"
 
 training:
-  output_dir: "outputs/qwen3vl-lora"
+  output_dir: "outputs/qwen35-lora"
   num_train_epochs: 3
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 8

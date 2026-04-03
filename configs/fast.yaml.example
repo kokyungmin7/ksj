@@ -1,8 +1,9 @@
 model:
-  qwen_name: "Qwen/Qwen3-VL-8B-Instruct"
+  qwen_name: "Qwen/Qwen3.5-9B"
   dino_name: "facebook/dinov3-vits16-pretrain-lvd1689m"
   torch_dtype: "bfloat16"
   attn_implementation: "flash_attention_2"
+  enable_thinking: false
   min_pixels: 200704   # 256 * 28 * 28
   max_pixels: 1003520  # 1280 * 28 * 28
 
@@ -28,7 +29,7 @@ lora:
     - "down_proj"
 
 training:
-  output_dir: "outputs/qwen3vl-lora-fast"
+  output_dir: "outputs/qwen35-lora-fast"
   num_train_epochs: 1
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 4

@@ -18,7 +18,7 @@ _CHOICE_TEXT = (
 
 
 def build_messages(row: dict, image_root: str) -> list[dict]:
-    """Build Qwen3-VL chat messages for inference (no assistant turn)."""
+    """Build Qwen3.5 chat messages for inference (no assistant turn)."""
     image_path = os.path.abspath(os.path.join(image_root, row["path"]))
     return [
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
@@ -33,7 +33,7 @@ def build_messages(row: dict, image_root: str) -> list[dict]:
 
 
 def build_messages_with_crop(row: dict, image_root: str, crop_path: str) -> list[dict]:
-    """Build Qwen3-VL messages with original image + DINOv3 attention crop."""
+    """Build Qwen3.5 messages with original image + GroundingDINO crop."""
     image_path = os.path.abspath(os.path.join(image_root, row["path"]))
     crop_abs = os.path.abspath(crop_path)
     return [
@@ -57,7 +57,7 @@ def build_messages_with_crop(row: dict, image_root: str, crop_path: str) -> list
 
 
 def build_training_messages(row: dict, image_root: str) -> list[dict]:
-    """Build Qwen3-VL chat messages for SFT training (includes assistant turn)."""
+    """Build Qwen3.5 chat messages for SFT training (includes assistant turn)."""
     messages = build_messages(row, image_root)
     messages.append({"role": "assistant", "content": [{"type": "text", "text": str(row["answer"]).strip().lower()}]})
     return messages

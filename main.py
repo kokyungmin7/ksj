@@ -42,7 +42,7 @@ def load_config(path: str) -> SimpleNamespace:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Korean Recycling VQA — Qwen3-VL + DINOv3 pipeline"
+        description="Korean Recycling VQA — Qwen3.5 + GroundingDINO pipeline"
     )
     parser.add_argument(
         "mode",

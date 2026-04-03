@@ -29,7 +29,7 @@
 
 ## 개요
 한국어 재활용 분류 VQA 데이터셋 (train.csv + 이미지 5,072개)에 대해
-Qwen3-VL-8B-Instruct를 QLoRA로 파인튜닝하고, GroundingDINO로 이미지 ROI crop 및
+Qwen3.5-9B를 QLoRA로 파인튜닝하고, GroundingDINO로 이미지 ROI crop 및
 개수 세기를 보조하는 파이프라인.
 
 ---
@@ -52,7 +52,7 @@ ksj/
 │   └── dataset.py              # Dataset, DataCollator, train/val 분리
 ├── models/
 │   ├── __init__.py
-│   ├── qwen.py                 # Qwen3-VL 로드 + 추론 (원본/crop 2-image)
+│   ├── qwen.py                 # Qwen3.5 로드 + 추론 (원본/crop 2-image)
 │   ├── dino.py                 # DINOv3: attention crop + blob counting (레거시)
 │   └── grounding_dino.py       # GroundingDINO: text-guided detection + crop + counting
 ├── pipeline/
@@ -101,7 +101,7 @@ GroundingDINO enabled?
 
 | 모델 | 용도 | 로드 방식 |
 |---|---|---|
-| Qwen/Qwen3-VL-8B-Instruct | VQA 추론 / QLoRA 학습 | 4-bit NF4 (학습), bfloat16 (평가) |
+| Qwen/Qwen3.5-9B | VQA 추론 / QLoRA 학습 | 4-bit NF4 (학습), bfloat16 (평가) |
 | IDEA-Research/grounding-dino-tiny | text-guided detection + counting | device_map="auto" |
 
 ---
@@ -143,10 +143,11 @@ GroundingDINO(영어 프롬프트) → 개별 bbox 탐지
 
 ---
 
-## 프롬프트 형식 (Qwen3-VL)
+## 프롬프트 형식 (Qwen3.5)
 
 ```python
 # content는 반드시 list 형식 (string이면 apply_chat_template에서 TypeError)
+# enable_thinking=False로 thinking 모드 비활성화 (VQA 직접 답변용)
 [
   {"role": "system",    "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
   {"role": "user",      "content": [
@@ -233,7 +234,7 @@ uv run main.py train --config configs/fast.yaml
 uv run main.py train
 
 # fine-tuned 모델 평가
-uv run main.py evaluate --checkpoint outputs/qwen3vl-lora
+uv run main.py evaluate --checkpoint outputs/qwen35-lora
 
 # reference 갤러리 지정
 uv run main.py evaluate --reference-dir data/references/bong/

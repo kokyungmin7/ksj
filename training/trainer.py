@@ -46,6 +46,7 @@ class F1EvalCallback(TrainerCallback):
     @torch.inference_mode()
     def _batch_predict(self, model, rows: list[dict]) -> list[str]:
         """Run batched generation on a list of row dicts."""
+        enable_thinking = getattr(self.cfg.model, "enable_thinking", False)
         all_messages = [
             build_messages(r, self.cfg.data.image_root) for r in rows
         ]
@@ -53,6 +54,7 @@ class F1EvalCallback(TrainerCallback):
         texts = [
             self.processor.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True,
+                enable_thinking=enable_thinking,
             )
             for m in all_messages
         ]
@@ -150,7 +152,7 @@ class F1EvalCallback(TrainerCallback):
 
 
 def run_training(cfg: SimpleNamespace) -> None:
-    """Fine-tune Qwen3-VL with QLoRA on the training split."""
+    """Fine-tune Qwen3.5 with QLoRA on the training split."""
     model, processor = load_qwen(cfg)
 
     # Enable grad for frozen base model (required for gradient checkpointing + PEFT)
@@ -171,9 +173,10 @@ def run_training(cfg: SimpleNamespace) -> None:
     print(f"Train: {len(train_df)} samples | Val: {len(val_df)} samples")
 
     do_shuffle = getattr(cfg.training, "shuffle_choices", True)
+    enable_thinking = getattr(cfg.model, "enable_thinking", False)
     train_dataset = KoreanRecyclingVQADataset(train_df, cfg.data.image_root, shuffle=do_shuffle)
     val_dataset = KoreanRecyclingVQADataset(val_df, cfg.data.image_root, shuffle=False)
-    collator = VQADataCollator(processor, cfg.training.max_seq_length)
+    collator = VQADataCollator(processor, cfg.training.max_seq_length, enable_thinking=enable_thinking)
 
     training_args = SFTConfig(
         output_dir=cfg.training.output_dir,
