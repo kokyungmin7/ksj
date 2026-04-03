@@ -49,10 +49,13 @@ def detect(model, processor, image: Image.Image, prompt: str, box_thr: float, te
           f"min={inputs['pixel_values'].min():.3f}  max={inputs['pixel_values'].max():.3f}")
 
     outputs = model(**inputs)
+    import inspect
+    sig = inspect.signature(processor.post_process_grounded_object_detection)
+    thr_kwarg = "box_threshold" if "box_threshold" in sig.parameters else "threshold"
     results = processor.post_process_grounded_object_detection(
         outputs,
         inputs.input_ids,
-        box_threshold=box_thr,
+        **{thr_kwarg: box_thr},
         text_threshold=text_thr,
         target_sizes=[image.size[::-1]],
     )

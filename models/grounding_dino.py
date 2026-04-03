@@ -44,10 +44,16 @@ def _detect(
     inputs = processor(images=image, text=prompt, return_tensors="pt").to(model.device)
     outputs = model(**inputs)
 
+    # Parameter name changed across transformers versions:
+    #   older: threshold=  newer: box_threshold=
+    import inspect
+    sig = inspect.signature(processor.post_process_grounded_object_detection)
+    thr_kwarg = "box_threshold" if "box_threshold" in sig.parameters else "threshold"
+
     results = processor.post_process_grounded_object_detection(
         outputs,
         inputs.input_ids,
-        box_threshold=box_threshold,
+        **{thr_kwarg: box_threshold},
         text_threshold=text_threshold,
         target_sizes=[image.size[::-1]],  # (H, W)
     )
