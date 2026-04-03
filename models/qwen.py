@@ -71,20 +71,27 @@ def load_finetuned_qwen(checkpoint_dir: str, cfg: SimpleNamespace) -> tuple:
 
 
 def load_base_qwen(cfg: SimpleNamespace) -> tuple:
-    """Load Qwen3-VL base model (no quantization) for zero-shot evaluation."""
-    dtype = torch.bfloat16 if cfg.model.torch_dtype == "bfloat16" else torch.float16
+    """Load Qwen3-VL base model with 4-bit NF4 quantization for zero-shot evaluation."""
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
     try:
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             cfg.model.qwen_name,
+            quantization_config=bnb_config,
             attn_implementation=cfg.model.attn_implementation,
-            torch_dtype=dtype,
+            torch_dtype=torch.bfloat16,
             device_map="auto",
         )
     except Exception:
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             cfg.model.qwen_name,
+            quantization_config=bnb_config,
             attn_implementation="eager",
-            torch_dtype=dtype,
+            torch_dtype=torch.bfloat16,
             device_map="auto",
         )
 
