@@ -81,6 +81,7 @@ class Predictor:
         trace = {
             "route": "qwen_only",
             "bbox": None,
+            "blobs_bbox": [],
             "attn_map": None,
             "attn_map_full": None,
             "crop": None,
@@ -102,6 +103,7 @@ class Predictor:
 
         trace: dict = {
             "bbox": crop_result["bbox"],
+            "blobs_bbox": crop_result["blobs_bbox"],
             "attn_map": crop_result["attn_map"],
             "attn_map_full": crop_result["attn_map_full"],
             "crop": crop_result["crop"],

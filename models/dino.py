@@ -92,10 +92,21 @@ def get_attention_crop(
     labeled, _ = ndimage.label(binary)
     slices = ndimage.find_objects(labeled)
 
-    if slices:
-        # Union of all object slices → single bounding box
-        rows = [s[0] for s in slices]
-        cols = [s[1] for s in slices]
+    # Filter blobs by min_blob_size to exclude noise
+    min_blob_size = getattr(cfg.dino, "min_blob_size", 50)
+    significant: list[tuple] = []  # (slice_row, slice_col) for significant blobs
+    blobs_bbox: list[tuple[int, int, int, int]] = []  # (x1, y1, x2, y2) per blob
+
+    for label_id, s in enumerate(slices, start=1):
+        if (labeled == label_id).sum() >= min_blob_size:
+            significant.append(s)
+            by1, by2 = s[0].start, s[0].stop
+            bx1, bx2 = s[1].start, s[1].stop
+            blobs_bbox.append((bx1, by1, bx2, by2))
+
+    if significant:
+        rows = [s[0] for s in significant]
+        cols = [s[1] for s in significant]
         y1 = min(r.start for r in rows)
         y2 = max(r.stop for r in rows)
         x1 = min(c.start for c in cols)
@@ -118,12 +129,14 @@ def get_attention_crop(
     if used_full:
         crop = image.copy()
         x1, y1, x2, y2 = 0, 0, orig_w, orig_h
+        blobs_bbox = []
     else:
         crop = image.crop((x1, y1, x2, y2))
 
     return {
         "crop": crop,
         "bbox": (x1, y1, x2, y2),
+        "blobs_bbox": blobs_bbox,   # individual bbox per significant blob
         "attn_map": attn_map,
         "attn_map_full": attn_full,
         "used_full": used_full,

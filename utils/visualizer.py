@@ -132,6 +132,7 @@ def save_visualization(
     attn_full = trace.get("attn_map_full")   # None when DINOv3 disabled
     crop_img = trace.get("crop")
     bbox = trace.get("bbox")
+    blobs_bbox = trace.get("blobs_bbox") or []   # individual blob bboxes
     route = trace["route"]
     dino_cnt = trace["dino_count"]
     gt = str(row.get("answer", "?")).strip().lower()
@@ -156,19 +157,23 @@ def save_visualization(
         ax3 = fig.add_subplot(gs[0, 2])
         ax4 = fig.add_subplot(gs[0, 3])
 
-        # ── Panel 1: Original + bbox ──────────────────────────────────────────
+        # ── Panel 1: Original + individual blob bboxes ───────────────────────
         ax1.imshow(orig_np)
-        x1, y1, x2, y2 = bbox
-        rect = patches.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1,
-            linewidth=2, edgecolor="#ff4444", facecolor="none",
-        )
-        ax1.add_patch(rect)
-        ax1.set_title("원본 이미지 + ROI bbox", color="white", fontsize=9, pad=4)
+        draw_bboxes = blobs_bbox if blobs_bbox else ([bbox] if bbox else [])
+        for bx1, by1, bx2, by2 in draw_bboxes:
+            rect = patches.Rectangle(
+                (bx1, by1), bx2 - bx1, by2 - by1,
+                linewidth=2, edgecolor="#ff4444", facecolor="none",
+            )
+            ax1.add_patch(rect)
+        n_blobs = len(draw_bboxes)
+        bbox_label = f"원본 이미지 + ROI bbox ({n_blobs}개)" if n_blobs > 1 else "원본 이미지 + ROI bbox"
+        ax1.set_title(bbox_label, color="white", fontsize=9, pad=4)
         ax1.axis("off")
 
-        # ── Panel 2: Attention heatmap ────────────────────────────────────────
-        ax2.imshow(attn_full, cmap="jet", interpolation="bilinear")
+        # ── Panel 2: Attention heatmap (normalized) ───────────────────────────
+        attn_norm_vis = (attn_full - attn_full.min()) / (attn_full.max() - attn_full.min() + 1e-8)
+        ax2.imshow(attn_norm_vis, cmap="jet", interpolation="bilinear")
         ax2.set_title("Attention Heatmap", color="white", fontsize=9, pad=4)
         ax2.axis("off")
 
