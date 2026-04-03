@@ -121,6 +121,7 @@ def qwen_predict(
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
+        truncation=False,
     )
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
@@ -160,6 +161,7 @@ def qwen_predict_with_crop(
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
+        truncation=False,
     )
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
