@@ -77,7 +77,7 @@ def run_evaluation(
             "predicted": pred,
             "correct": pred == gt,
             "route": trace["route"],
-            "bbox": list(trace["bbox"]),
+            "bbox": list(trace["bbox"]) if trace["bbox"] is not None else [],
             "dino_count": trace["dino_count"],
         })
 
