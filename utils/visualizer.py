@@ -1,9 +1,36 @@
 from __future__ import annotations
 
 import os
+import warnings
 
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for server environments
+import matplotlib.font_manager as fm
+
+_KO_FONTS = [
+    "NanumGothic",
+    "NanumBarunGothic",
+    "Noto Sans CJK KR",
+    "Noto Sans KR",
+    "UnDotum",
+    "Malgun Gothic",
+    "AppleGothic",
+]
+
+def _find_korean_font() -> str | None:
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in _KO_FONTS:
+        if name in available:
+            return name
+    return None
+
+_ko_font = _find_korean_font()
+if _ko_font:
+    matplotlib.rcParams["font.family"] = "sans-serif"
+    matplotlib.rcParams["font.sans-serif"] = [_ko_font, "DejaVu Sans"]
+else:
+    warnings.filterwarnings("once", message="Glyph .* missing from font")
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -144,7 +171,7 @@ def save_visualization(
         color=text_color,
         verticalalignment="top",
         wrap=True,
-        fontfamily="monospace",
+        fontfamily="sans-serif",
     )
 
     # ── Save ──────────────────────────────────────────────────────────────────
