@@ -55,13 +55,39 @@ def _get_raw_attention_map(
     return attn_map, (image.width, image.height)
 
 
-def _upsample_attn(attn_map: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
-    """Bilinear upsample attention map to (target_h, target_w)."""
+def _upsample_attn(
+    attn_map: np.ndarray, target_w: int, target_h: int, mode: str = "bilinear"
+) -> np.ndarray:
+    """Upsample attention map to (target_h, target_w).
+
+    Use mode='bilinear' for smooth heatmap visualization.
+    Use mode='nearest' for binary mask generation (preserves patch boundaries).
+    """
     t = torch.from_numpy(attn_map).unsqueeze(0).unsqueeze(0).float()
-    up = F.interpolate(
-        t, size=(target_h, target_w), mode="bilinear", align_corners=False
-    )
+    kwargs = {"align_corners": False} if mode == "bilinear" else {}
+    up = F.interpolate(t, size=(target_h, target_w), mode=mode, **kwargs)
     return up.squeeze().numpy()
+
+
+def _mass_threshold(attn_map: np.ndarray, threshold: float) -> np.ndarray:
+    """Binary mask keeping the top `threshold` fraction of attention mass.
+
+    Official Facebook DINO (visualize_attention.py) approach:
+      1. Sort attention values ascending.
+      2. Normalize to a probability distribution (sum = 1).
+      3. Compute cumulative sum; pixels where cumsum > (1 - threshold) form the
+         smallest set that carries `threshold` fraction of total attention mass.
+
+    This is image-agnostic — the result always covers a consistent *proportion*
+    of foreground regardless of the absolute attention scale.
+    """
+    flat = attn_map.flatten()
+    sorted_vals = np.sort(flat)                            # ascending
+    sorted_norm = sorted_vals / (sorted_vals.sum() + 1e-8)
+    cumsum = np.cumsum(sorted_norm)
+    above = sorted_vals[cumsum > (1 - threshold)]
+    cutoff = above[0] if len(above) > 0 else flat.min()
+    return (attn_map >= cutoff).astype(np.uint8)
 
 
 def get_attention_crop(
@@ -82,11 +108,13 @@ def get_attention_crop(
         }
     """
     attn_map, (orig_w, orig_h) = _get_raw_attention_map(model, processor, image)
-    attn_full = _upsample_attn(attn_map, orig_w, orig_h)
+    # bilinear: smooth heatmap for visualization
+    attn_full = _upsample_attn(attn_map, orig_w, orig_h, mode="bilinear")
+    # nearest: sharp patch boundaries for binary mask
+    attn_full_nearest = _upsample_attn(attn_map, orig_w, orig_h, mode="nearest")
 
-    # Binarize
-    threshold = cfg.dino.attention_threshold * attn_full.max()
-    binary = (attn_full >= threshold).astype(np.uint8)
+    # Mass-based threshold (official DINO approach)
+    binary = _mass_threshold(attn_full_nearest, cfg.dino.attention_threshold)
 
     # Find bounding box via ndimage
     labeled, _ = ndimage.label(binary)
@@ -156,9 +184,10 @@ def _count_blobs(binary_map: np.ndarray, min_size: int) -> int:
 def _attention_blob_count(
     model, processor, image: Image.Image, cfg: SimpleNamespace
 ) -> int:
-    attn_map, _ = _get_raw_attention_map(model, processor, image)
-    threshold = cfg.dino.attention_threshold * attn_map.max()
-    binary = attn_map >= threshold
+    # Upsample to pixel-space so min_blob_size is always in pixel units (not patches)
+    attn_map, (orig_w, orig_h) = _get_raw_attention_map(model, processor, image)
+    attn_full = _upsample_attn(attn_map, orig_w, orig_h, mode="nearest")
+    binary = _mass_threshold(attn_full, cfg.dino.attention_threshold)
     return _count_blobs(binary, cfg.dino.min_blob_size)
 
 
