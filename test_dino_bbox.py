@@ -7,10 +7,16 @@ Usage:
 
 Output:
     test_dino_bbox_result.png  — 3-panel: original+bboxes | union crop | SAM masks
+
+VRAM (L4 24GB 등): 기본 8bit 양자화 + GDINO 추론 후 SAM만 로드(순차 로딩).
+    --quant 8   # 기본, bitsandbytes 8bit
+    --quant 4   # NF4 4bit (더 절약, 품질 소폭 저하 가능)
+    --quant none  # FP16 (메모리 여유 있을 때)
 """
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +29,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-from transformers import SamModel, SamProcessor
+from transformers import BitsAndBytesConfig, SamModel, SamProcessor
 
 GDINO_MODEL = "IDEA-Research/grounding-dino-tiny"
 SAM_MODEL = "facebook/sam-vit-base"
@@ -45,24 +51,61 @@ SAM_CFG = SimpleNamespace(
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
-def load_gdino():
-    print(f"Loading GroundingDINO ({GDINO_MODEL}) ...")
+def _bnb_config(quant: str) -> BitsAndBytesConfig | None:
+    if quant == "none":
+        return None
+    if quant == "8":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    if quant == "4":
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+    raise ValueError(f"quant must be none|4|8, got {quant!r}")
+
+
+def _model_device(model: torch.nn.Module) -> torch.device:
+    return next(model.parameters()).device
+
+
+def load_gdino(quant: str = "8"):
+    print(f"Loading GroundingDINO ({GDINO_MODEL})  quant={quant} ...")
     processor = AutoProcessor.from_pretrained(GDINO_MODEL)
+    qcfg = _bnb_config(quant)
+    kwargs: dict = {"device_map": "auto"}
+    if qcfg is not None:
+        kwargs["quantization_config"] = qcfg
+    else:
+        kwargs["torch_dtype"] = torch.float16
     model = AutoModelForZeroShotObjectDetection.from_pretrained(
-        GDINO_MODEL, device_map="auto"
+        GDINO_MODEL, **kwargs
     )
     model.eval()
-    print(f"  device: {next(model.parameters()).device}")
+    print(f"  device: {_model_device(model)}")
     return model, processor
 
 
-def load_sam_model():
-    print(f"Loading SAM ({SAM_MODEL}) ...")
+def load_sam_model(quant: str = "8"):
+    print(f"Loading SAM ({SAM_MODEL})  quant={quant} ...")
     processor = SamProcessor.from_pretrained(SAM_MODEL)
-    model = SamModel.from_pretrained(SAM_MODEL, device_map="auto")
+    qcfg = _bnb_config(quant)
+    kwargs: dict = {"device_map": "auto"}
+    if qcfg is not None:
+        kwargs["quantization_config"] = qcfg
+    else:
+        kwargs["torch_dtype"] = torch.float16
+    model = SamModel.from_pretrained(SAM_MODEL, **kwargs)
     model.eval()
-    print(f"  device: {next(model.parameters()).device}")
+    print(f"  device: {_model_device(model)}")
     return model, processor
+
+
+def free_cuda_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # ── GroundingDINO detection ───────────────────────────────────────────────────
@@ -71,7 +114,8 @@ def load_sam_model():
 def gdino_detect(model, processor, image, prompt, box_thr, text_thr):
     p = prompt.strip().rstrip(".") + "."
     print(f"  prompt: '{p}'")
-    inputs = processor(images=image, text=p, return_tensors="pt").to(model.device)
+    dev = _model_device(model)
+    inputs = processor(images=image, text=p, return_tensors="pt").to(dev)
     outputs = model(**inputs)
 
     import inspect
@@ -134,7 +178,7 @@ def sam_count(sam_model, sam_processor, image, bbox, cfg=SAM_CFG):
             images=[crop] * len(chunk),
             input_points=[[[p]] for p in chunk],
             return_tensors="pt",
-        ).to(sam_model.device)
+        ).to(_model_device(sam_model))
 
         outputs = sam_model(**inputs)
         masks_np = sam_processor.post_process_masks(
@@ -214,6 +258,12 @@ def main():
     parser.add_argument("--box-threshold", type=float, default=BOX_THRESHOLD)
     parser.add_argument("--text-threshold", type=float, default=TEXT_THRESHOLD)
     parser.add_argument("--grid-size", type=int, default=8)
+    parser.add_argument(
+        "--quant",
+        choices=("none", "4", "8"),
+        default="8",
+        help="bitsandbytes: 8=8bit (default), 4=NF4, none=FP16",
+    )
     parser.add_argument("--output", default=OUTPUT_PATH)
     args = parser.parse_args()
 
@@ -231,14 +281,16 @@ def main():
     image = Image.open(image_path).convert("RGB")
     print(f"Size  : {image.width} x {image.height}")
 
-    gdino_model, gdino_proc = load_gdino()
-    sam_model, sam_proc = load_sam_model()
+    gdino_model, gdino_proc = load_gdino(args.quant)
 
     print("\n[1] GroundingDINO detection ...")
     detections = gdino_detect(gdino_model, gdino_proc, image,
                                args.prompt, args.box_threshold, args.text_threshold)
     for i, (x1, y1, x2, y2, score, label) in enumerate(detections):
         print(f"  [{i+1}] ({x1},{y1})->({x2},{y2})  score={score:.3f}  label={label}")
+
+    del gdino_model
+    free_cuda_memory()
 
     if detections:
         pad = 20
@@ -250,6 +302,7 @@ def main():
         print(f"  union bbox: {union_bbox}")
 
         print("\n[2] SAM instance counting ...")
+        sam_model, sam_proc = load_sam_model(args.quant)
         count, kept_masks, crop_img = sam_count(sam_model, sam_proc, image, union_bbox)
         print(f"  Final count: {count}")
     else:
