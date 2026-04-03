@@ -17,9 +17,9 @@ def load_dino(cfg: SimpleNamespace) -> tuple:
     processor = AutoImageProcessor.from_pretrained(cfg.model.dino_name)
     model = AutoModel.from_pretrained(
         cfg.model.dino_name,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,    # bfloat16: same exponent range as float32 → no NaN in softmax
         device_map="auto",
-        attn_implementation="eager",
+        attn_implementation="eager",   # sdpa does not support output_attentions=True
     )
     model.eval()
     return model, processor

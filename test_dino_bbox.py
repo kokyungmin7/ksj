@@ -39,7 +39,7 @@ def load_model():
     processor = AutoImageProcessor.from_pretrained(DINO_MODEL)
     model = AutoModel.from_pretrained(
         DINO_MODEL,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,    # bfloat16: same exponent range as float32, no softmax NaN
         device_map="auto",
         attn_implementation="eager",   # required for output_attentions=True
     )
