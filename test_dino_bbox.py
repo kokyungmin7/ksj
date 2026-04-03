@@ -1,18 +1,20 @@
-"""Standalone Grounded SAM test: GroundingDINO bbox → SAM instance count.
+"""Standalone test: GroundingDINO bbox → DINOv2 reference similarity counting.
 
 Usage:
-    uv run test_dino_bbox.py --image train/train_1940.jpg --prompt "styrofoam box"
-    uv run test_dino_bbox.py --image train/train_0001.jpg --prompt "PET bottle"
-    uv run test_dino_bbox.py --image train/train_0001.jpg --prompt "can"
+    # 레퍼런스 이미지로 카운팅
+    uv run test_dino_bbox.py --image train/train_1940.jpg --prompt "styrofoam box" \
+        --reference reference/ex_styrofoam_box.png
+
+    # 사전 계산된 임베딩 갤러리 (.pt) 사용
+    uv run test_dino_bbox.py --image train/train_1940.jpg --prompt "styrofoam box" \
+        --reference embeddings/styrofoam.pt
+
+    # 임베딩 갤러리 생성 (레퍼런스 이미지 → .pt 파일)
+    uv run test_dino_bbox.py --build-gallery reference/styrofoam/ \
+        --gallery-out embeddings/styrofoam.pt
 
 Output:
-    test_dino_bbox_result.png  — 3-panel: original+bboxes | union crop | SAM masks
-
-VRAM (L4 24GB 등): GroundingDINO만 bitsandbytes 양자화 + 추론 후 SAM 로드(순차).
-    SAM은 attention에 4D 텐서가 들어가 bnb Linear와 호환되지 않아 항상 FP16.
-    --quant 8   # GDINO 8bit (기본)
-    --quant 4   # GDINO NF4
-    --quant none  # GDINO도 FP16
+    test_dino_bbox_result.png — 4-panel visualization
 """
 from __future__ import annotations
 
@@ -20,7 +22,6 @@ import argparse
 import gc
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import matplotlib
 matplotlib.use("Agg")
@@ -28,103 +29,73 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-from transformers import BitsAndBytesConfig, SamModel, SamProcessor
+from scipy import ndimage
+from transformers import (
+    AutoImageProcessor,
+    AutoModel,
+    AutoProcessor,
+    AutoModelForZeroShotObjectDetection,
+    BitsAndBytesConfig,
+)
 
 GDINO_MODEL = "IDEA-Research/grounding-dino-tiny"
-SAM_MODEL = "facebook/sam-vit-base"
+DINO_MODEL = "facebook/dinov2-small"
 DEFAULT_IMAGE = "train/train_0001.jpg"
 DEFAULT_PROMPT = "recyclable item"
 BOX_THRESHOLD = 0.25
 TEXT_THRESHOLD = 0.20
+SIM_THRESHOLD = 0.5
+MIN_BLOB_SIZE = 3
 OUTPUT_PATH = "test_dino_bbox_result.png"
-
-# Minimal cfg namespace for models/sam.py
-SAM_CFG = SimpleNamespace(
-    grid_size=8,
-    min_mask_area=0.02,
-    max_mask_area=0.90,
-    iou_threshold=0.5,
-    chunk_size=16,
-)
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-# ── Model loading ─────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
-def _bnb_config(quant: str) -> BitsAndBytesConfig | None:
-    if quant == "none":
-        return None
-    if quant == "8":
-        return BitsAndBytesConfig(load_in_8bit=True)
-    if quant == "4":
-        return BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
-    raise ValueError(f"quant must be none|4|8, got {quant!r}")
-
-
-def _model_device(model: torch.nn.Module) -> torch.device:
+def _device_of(model: torch.nn.Module) -> torch.device:
     return next(model.parameters()).device
 
 
-def _batch_to_model_dtype(batch, model: torch.nn.Module) -> object:
-    """SamProcessor 등이 float32를 주면 FP16 모델과 conv dtype이 어긋난다."""
-    dev = _model_device(model)
-    dt = next(model.parameters()).dtype
-    batch = batch.to(dev)
-    for k in list(batch.keys()):
-        v = batch[k]
-        if torch.is_tensor(v) and v.is_floating_point():
-            batch[k] = v.to(dtype=dt)
-    return batch
-
-
-def load_gdino(quant: str = "8"):
-    print(f"Loading GroundingDINO ({GDINO_MODEL})  quant={quant} ...")
-    processor = AutoProcessor.from_pretrained(GDINO_MODEL)
-    qcfg = _bnb_config(quant)
-    kwargs: dict = {"device_map": "auto"}
-    if qcfg is not None:
-        kwargs["quantization_config"] = qcfg
-    else:
-        kwargs["torch_dtype"] = torch.float16
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(
-        GDINO_MODEL, **kwargs
-    )
-    model.eval()
-    print(f"  device: {_model_device(model)}")
-    return model, processor
-
-
-def load_sam_model():
-    # bitsandbytes 8bit/4bit Linear는 2D/3D 입력만 지원. SAM ViT qkv는 4D → RuntimeError.
-    print(f"Loading SAM ({SAM_MODEL})  dtype=fp16 (no bnb) ...")
-    processor = SamProcessor.from_pretrained(SAM_MODEL)
-    model = SamModel.from_pretrained(
-        SAM_MODEL, device_map="auto", torch_dtype=torch.float16
-    )
-    model.eval()
-    print(f"  device: {_model_device(model)}")
-    return model, processor
-
-
-def free_cuda_memory() -> None:
+def _free_vram() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
-# ── GroundingDINO detection ───────────────────────────────────────────────────
+# ── GroundingDINO ─────────────────────────────────────────────────────────────
+
+def load_gdino(quant: str = "8"):
+    print(f"Loading GroundingDINO ({GDINO_MODEL})  quant={quant} ...")
+    processor = AutoProcessor.from_pretrained(GDINO_MODEL)
+
+    kwargs: dict = {"device_map": "auto"}
+    if quant == "8":
+        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    elif quant == "4":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+    else:
+        kwargs["torch_dtype"] = torch.float16
+
+    model = AutoModelForZeroShotObjectDetection.from_pretrained(
+        GDINO_MODEL, **kwargs
+    )
+    model.eval()
+    print(f"  device: {_device_of(model)}")
+    return model, processor
+
 
 @torch.inference_mode()
 def gdino_detect(model, processor, image, prompt, box_thr, text_thr):
     p = prompt.strip().rstrip(".") + "."
     print(f"  prompt: '{p}'")
-    dev = _model_device(model)
+    dev = _device_of(model)
     inputs = processor(images=image, text=p, return_tensors="pt").to(dev)
     outputs = model(**inputs)
 
@@ -140,90 +111,158 @@ def gdino_detect(model, processor, image, prompt, box_thr, text_thr):
     boxes = results[0]["boxes"].cpu().numpy()
     scores = results[0]["scores"].cpu().numpy()
     labels = results[0]["labels"]
-    detections = [(int(x1), int(y1), int(x2), int(y2), float(s), str(l))
-                  for (x1, y1, x2, y2), s, l in zip(boxes, scores, labels)]
+    detections = [
+        (int(x1), int(y1), int(x2), int(y2), float(s), str(lb))
+        for (x1, y1, x2, y2), s, lb in zip(boxes, scores, labels)
+    ]
     print(f"  {len(detections)} detection(s)")
     return detections
 
 
-# ── SAM instance counting ─────────────────────────────────────────────────────
+# ── DINOv2 ────────────────────────────────────────────────────────────────────
 
-def _nms_masks(masks, iou_thr):
-    if not masks:
-        return []
-    areas = [m.sum() for m in masks]
-    keep, suppressed = [], [False] * len(masks)
-    for i in range(len(masks)):
-        if suppressed[i]:
-            continue
-        keep.append(i)
-        for j in range(i + 1, len(masks)):
-            if suppressed[j]:
-                continue
-            inter = (masks[i] & masks[j]).sum()
-            union = areas[i] + areas[j] - inter
-            if union > 0 and inter / union > iou_thr:
-                suppressed[j] = True
-    return keep
+def load_dinov2(model_name: str = DINO_MODEL):
+    print(f"Loading DINOv2 ({model_name}) ...")
+    processor = AutoImageProcessor.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        attn_implementation="eager",
+    )
+    model.eval()
+    print(f"  device: {_device_of(model)}")
+    return model, processor
 
 
 @torch.inference_mode()
-def sam_count(sam_model, sam_processor, image, bbox, cfg=SAM_CFG):
-    x1, y1, x2, y2 = bbox
-    crop = image.crop((x1, y1, x2, y2))
-    cw, ch = crop.width, crop.height
-    crop_area = cw * ch
-    print(f"  SAM crop size: {cw}x{ch}")
+def extract_patch_features(model, processor, image: Image.Image) -> torch.Tensor:
+    """(num_patches, hidden_dim) patch features."""
+    inputs = processor(images=image, return_tensors="pt").to(_device_of(model))
+    outputs = model(**inputs)
+    num_register = getattr(model.config, "num_register_tokens", 0)
+    return outputs.last_hidden_state[0, 1 + num_register:]
 
-    grid_points = [
-        [(col + 0.5) * cw / cfg.grid_size, (row + 0.5) * ch / cfg.grid_size]
-        for row in range(cfg.grid_size)
-        for col in range(cfg.grid_size)
-    ]
 
-    candidate_masks = []
-    for start in range(0, len(grid_points), cfg.chunk_size):
-        chunk = grid_points[start: start + cfg.chunk_size]
-        inputs = _batch_to_model_dtype(
-            sam_processor(
-                images=[crop] * len(chunk),
-                input_points=[[[p]] for p in chunk],
-                return_tensors="pt",
-            ),
-            sam_model,
-        )
+def build_reference_embedding(
+    model, processor, images: list[Image.Image],
+) -> torch.Tensor:
+    """여러 레퍼런스 이미지 → 단일 L2-정규화 prototype (1, D).
 
-        outputs = sam_model(**inputs)
-        masks_np = sam_processor.post_process_masks(
-            outputs.pred_masks.cpu(),
-            inputs["original_sizes"].cpu(),
-            inputs["reshaped_input_sizes"].cpu(),
-        )
-        for b in range(len(chunk)):
-            b_masks = masks_np[b][0]           # (3, H, W)
-            b_scores = outputs.iou_scores[b, 0] # (3,)
-            best = int(b_scores.argmax())
-            mask = b_masks[best].numpy().astype(bool)
-            ratio = mask.sum() / crop_area
-            if cfg.min_mask_area <= ratio <= cfg.max_mask_area:
-                candidate_masks.append(mask)
+    향후 임베딩 갤러리에서는 이 함수 대신 .pt 파일을 직접 로드.
+    """
+    feats = []
+    for img in images:
+        pf = extract_patch_features(model, processor, img)
+        feats.append(pf.mean(dim=0))
+    prototype = torch.stack(feats).mean(dim=0, keepdim=True)
+    return F.normalize(prototype, dim=-1)
 
-    print(f"  {len(candidate_masks)} candidates before NMS")
-    keep_idx = _nms_masks(candidate_masks, cfg.iou_threshold)
-    print(f"  {len(keep_idx)} instances after NMS")
-    kept_masks = [candidate_masks[i] for i in keep_idx]
-    return len(keep_idx), kept_masks, crop
+
+def load_reference_prototype(
+    path: str, model=None, processor=None,
+) -> torch.Tensor:
+    """레퍼런스 로드: 이미지 / 이미지 디렉토리 / .pt 임베딩 → (1, D) prototype.
+
+    Returns:
+        L2-normalized prototype tensor on CPU.
+    """
+    p = Path(path)
+
+    if p.suffix == ".pt":
+        proto = torch.load(p, map_location="cpu", weights_only=True)
+        if proto.ndim == 1:
+            proto = proto.unsqueeze(0)
+        print(f"  Loaded embedding: {p}  shape={tuple(proto.shape)}")
+        return F.normalize(proto.float(), dim=-1)
+
+    if p.is_dir():
+        imgs = [
+            Image.open(f).convert("RGB")
+            for f in sorted(p.iterdir()) if f.suffix.lower() in IMAGE_EXTS
+        ]
+        if not imgs:
+            raise FileNotFoundError(f"No images in {p}")
+        print(f"  {len(imgs)} reference image(s) from {p}")
+    elif p.suffix.lower() in IMAGE_EXTS:
+        imgs = [Image.open(p).convert("RGB")]
+        print(f"  1 reference image: {p}")
+    else:
+        raise ValueError(f"Unsupported reference: {p}")
+
+    assert model is not None and processor is not None, \
+        "model/processor required when reference is image(s)"
+    return build_reference_embedding(model, processor, imgs).cpu()
+
+
+# ── Reference Similarity Counting ─────────────────────────────────────────────
+
+@torch.inference_mode()
+def reference_similarity_count(
+    model,
+    processor,
+    image: Image.Image,
+    prototype: torch.Tensor,
+    sim_threshold: float = SIM_THRESHOLD,
+    min_blob_size: int = MIN_BLOB_SIZE,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """코사인 유사도 맵 → binary → blob count.
+
+    Args:
+        prototype: (1, D) L2-normalized reference embedding.
+
+    Returns:
+        (count, sim_map, binary_map)
+        sim_map:    (num_h, num_w) float in [-1, 1]
+        binary_map: (num_h, num_w) uint8
+    """
+    dev = _device_of(model)
+    proto = prototype.to(dev)
+
+    query_feats = extract_patch_features(model, processor, image)
+    query_norm = F.normalize(query_feats, dim=-1)
+    sim = (query_norm @ proto.T).squeeze(-1).float().cpu()
+
+    patch_size = model.config.patch_size
+    inputs = processor(images=image, return_tensors="pt")
+    _, _, h, w = inputs["pixel_values"].shape
+    num_h, num_w = h // patch_size, w // patch_size
+    sim_map = sim.reshape(num_h, num_w).numpy()
+
+    binary = sim_map >= sim_threshold
+    labeled, num_features = ndimage.label(binary)
+    count = 0
+    for label_id in range(1, num_features + 1):
+        if (labeled == label_id).sum() >= min_blob_size:
+            count += 1
+
+    return count, sim_map, binary.astype(np.uint8)
+
+
+# ── Embedding Gallery Builder ─────────────────────────────────────────────────
+
+def build_gallery(image_dir: str, output_path: str, model_name: str = DINO_MODEL):
+    """레퍼런스 이미지 디렉토리 → .pt 임베딩 파일 생성."""
+    model, processor = load_dinov2(model_name)
+    proto = load_reference_prototype(image_dir, model, processor)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(proto.squeeze(0), output_path)
+    print(f"  Saved embedding: {output_path}  shape={tuple(proto.shape)}")
 
 
 # ── Visualization ─────────────────────────────────────────────────────────────
 
-def visualize(image, detections, union_bbox, sam_count_val, kept_masks, crop_img, prompt, output):
+def visualize(
+    image, detections, crop_img,
+    sim_map, binary_map, count,
+    prompt, reference_name, sim_threshold, output,
+):
     orig_np = np.array(image)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 7), facecolor="#1a1a2e")
+    fig, axes = plt.subplots(1, 4, figsize=(24, 7), facecolor="#1a1a2e")
     fig.suptitle(
-        f'Grounded SAM  prompt="{prompt}"  '
-        f'GDino={len(detections)} bbox  SAM={sam_count_val} instances',
-        color="white", fontsize=10,
+        f'prompt="{prompt}"  ref={reference_name}  '
+        f'GDino={len(detections)} bbox  count={count}',
+        color="white", fontsize=11, fontweight="bold",
     )
     for ax in axes:
         ax.set_facecolor("#0d0d1a")
@@ -239,92 +278,144 @@ def visualize(image, detections, union_bbox, sam_count_val, kept_masks, crop_img
         ))
         axes[0].text(x1, y1 - 4, f"{score:.2f}", color="#ff4444", fontsize=7)
     if not detections:
-        axes[0].text(0.5, 0.5, "NO DETECTIONS", transform=axes[0].transAxes,
-                     color="red", ha="center", va="center", fontsize=12)
+        axes[0].text(
+            0.5, 0.5, "NO DETECTIONS", transform=axes[0].transAxes,
+            color="red", ha="center", va="center", fontsize=12,
+        )
 
     # Panel 2: union crop
     axes[1].imshow(np.array(crop_img))
-    axes[1].set_title(f"Union Crop (SAM input)", color="white", fontsize=9)
+    axes[1].set_title("Union Crop (DINOv2 input)", color="white", fontsize=9)
 
-    # Panel 3: SAM masks overlay on crop
-    crop_np = np.array(crop_img)
-    overlay = crop_np.copy()
-    colors = plt.cm.tab10(np.linspace(0, 1, max(len(kept_masks), 1)))
-    for i, mask in enumerate(kept_masks):
-        color = (np.array(colors[i][:3]) * 255).astype(np.uint8)
-        overlay[mask] = (overlay[mask] * 0.4 + color * 0.6).astype(np.uint8)
-    axes[2].imshow(overlay)
-    axes[2].set_title(f"SAM Masks ({sam_count_val} instances)", color="white", fontsize=9)
+    # Panel 3: similarity heatmap with threshold line on colorbar
+    im = axes[2].imshow(sim_map, cmap="RdYlGn", vmin=-0.2, vmax=1.0)
+    axes[2].set_title("Cosine Similarity Map", color="white", fontsize=9)
+    cbar = fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(colors="white", labelsize=7)
+    cbar.ax.axhline(y=sim_threshold, color="cyan", linewidth=1.5, linestyle="--")
+
+    # Panel 4: binary + labeled blobs (blob별 다른 색상)
+    labeled_map, _ = ndimage.label(binary_map)
+    cmap_tab = plt.cm.tab10
+    rgb = np.full((*binary_map.shape, 3), 0.12, dtype=np.float32)
+    for lbl in range(1, labeled_map.max() + 1):
+        mask = labeled_map == lbl
+        if mask.sum() < MIN_BLOB_SIZE:
+            continue
+        color = cmap_tab(lbl % 10)[:3]
+        rgb[mask] = color
+    axes[3].imshow(rgb, interpolation="nearest")
+    axes[3].set_title(f"Binary Blobs (count={count})", color="white", fontsize=9)
 
     plt.tight_layout()
     plt.savefig(output, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"  Saved -> {output}")
+    print(f"  Saved → {output}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="GroundingDINO + DINOv2 reference similarity counting",
+    )
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument(
+        "--reference",
+        help="레퍼런스: 이미지 경로 / 디렉토리 / .pt 임베딩 파일",
+    )
     parser.add_argument("--box-threshold", type=float, default=BOX_THRESHOLD)
     parser.add_argument("--text-threshold", type=float, default=TEXT_THRESHOLD)
-    parser.add_argument("--grid-size", type=int, default=8)
+    parser.add_argument("--sim-threshold", type=float, default=SIM_THRESHOLD)
+    parser.add_argument("--min-blob-size", type=int, default=MIN_BLOB_SIZE)
     parser.add_argument(
-        "--quant",
-        choices=("none", "4", "8"),
-        default="8",
-        help="GroundingDINO only: 8=8bit, 4=NF4, none=FP16 (SAM은 항상 FP16)",
+        "--quant", choices=("none", "4", "8"), default="8",
+        help="GroundingDINO quantization (8bit default)",
     )
+    parser.add_argument("--dino-model", default=DINO_MODEL,
+                        help="DINOv2 model name or path")
     parser.add_argument("--output", default=OUTPUT_PATH)
+
+    parser.add_argument("--build-gallery",
+                        help="레퍼런스 이미지 디렉토리 → .pt 임베딩 생성 후 종료")
+    parser.add_argument("--gallery-out", default="embedding.pt",
+                        help="--build-gallery 출력 경로")
     args = parser.parse_args()
 
-    SAM_CFG.grid_size = args.grid_size
+    # ── Gallery build mode ──
+    if args.build_gallery:
+        build_gallery(args.build_gallery, args.gallery_out, args.dino_model)
+        return
+
+    if not args.reference:
+        parser.error("--reference is required (image, directory, or .pt file)")
 
     image_path = Path(args.image)
     if not image_path.exists():
         print(f"ERROR: image not found: {image_path}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\n=== Grounded SAM Test ===")
-    print(f"Image : {image_path}")
-    print(f"Prompt: {args.prompt}")
+    print("\n=== GroundingDINO + DINOv2 Reference Counting ===")
+    print(f"Image     : {image_path}")
+    print(f"Prompt    : {args.prompt}")
+    print(f"Reference : {args.reference}")
+    print(f"Threshold : sim={args.sim_threshold}  blob_min={args.min_blob_size}")
 
     image = Image.open(image_path).convert("RGB")
-    print(f"Size  : {image.width} x {image.height}")
+    print(f"Size      : {image.width} x {image.height}")
 
+    # ── Step 1: GroundingDINO detection ──
     gdino_model, gdino_proc = load_gdino(args.quant)
-
     print("\n[1] GroundingDINO detection ...")
-    detections = gdino_detect(gdino_model, gdino_proc, image,
-                               args.prompt, args.box_threshold, args.text_threshold)
+    detections = gdino_detect(
+        gdino_model, gdino_proc, image,
+        args.prompt, args.box_threshold, args.text_threshold,
+    )
     for i, (x1, y1, x2, y2, score, label) in enumerate(detections):
         print(f"  [{i+1}] ({x1},{y1})->({x2},{y2})  score={score:.3f}  label={label}")
 
     del gdino_model
-    free_cuda_memory()
+    _free_vram()
 
+    # ── Compute union crop ──
     if detections:
         pad = 20
         ux1 = max(0, min(d[0] for d in detections) - pad)
         uy1 = max(0, min(d[1] for d in detections) - pad)
-        ux2 = min(image.width,  max(d[2] for d in detections) + pad)
+        ux2 = min(image.width, max(d[2] for d in detections) + pad)
         uy2 = min(image.height, max(d[3] for d in detections) + pad)
-        union_bbox = (ux1, uy1, ux2, uy2)
-        print(f"  union bbox: {union_bbox}")
-
-        print("\n[2] SAM instance counting ...")
-        sam_model, sam_proc = load_sam_model()
-        count, kept_masks, crop_img = sam_count(sam_model, sam_proc, image, union_bbox)
-        print(f"  Final count: {count}")
+        crop_img = image.crop((ux1, uy1, ux2, uy2))
+        print(f"  union bbox: ({ux1},{uy1})->({ux2},{uy2})")
     else:
-        union_bbox = (0, 0, image.width, image.height)
-        count, kept_masks, crop_img = 0, [], image
+        crop_img = image
+        print("  No detections → using full image")
 
+    # ── Step 2: DINOv2 reference similarity counting ──
+    print("\n[2] DINOv2 reference similarity counting ...")
+    dino_model, dino_proc = load_dinov2(args.dino_model)
+
+    prototype = load_reference_prototype(
+        args.reference, dino_model, dino_proc,
+    ).to(_device_of(dino_model))
+
+    count, sim_map, binary_map = reference_similarity_count(
+        dino_model, dino_proc, crop_img, prototype,
+        sim_threshold=args.sim_threshold,
+        min_blob_size=args.min_blob_size,
+    )
+    print(f"  sim_map shape: {sim_map.shape}")
+    print(f"  sim range: [{sim_map.min():.3f}, {sim_map.max():.3f}]")
+    print(f"  Final count: {count}")
+
+    # ── Step 3: Visualization ──
     print("\n[3] Saving visualization ...")
-    visualize(image, detections, union_bbox, count, kept_masks, crop_img,
-              args.prompt, args.output)
+    ref_name = Path(args.reference).stem
+    visualize(
+        image, detections, crop_img,
+        sim_map, binary_map, count,
+        args.prompt, ref_name, args.sim_threshold, args.output,
+    )
     print("\nDone.")
 
 
