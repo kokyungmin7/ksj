@@ -5,8 +5,8 @@ description = "Korean Recycling VQA with Qwen3-VL + DINOv3"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.3.0",
-    "torchvision>=0.18.0",
+    "torch==2.10.0+cu128",
+    "torchvision==0.25.0+cu128",
     "transformers @ git+https://github.com/huggingface/transformers",
     "peft>=0.14.0",
     "trl>=0.12.0",
@@ -21,3 +21,12 @@ dependencies = [
     "tqdm>=4.66.0",
     "matplotlib>=3.8.0",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.indexes]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
