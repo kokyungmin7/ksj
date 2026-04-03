@@ -55,6 +55,15 @@ dino:
   crop_padding: 20
   crop_min_size: 64
 
+sam:
+  enabled: true
+  model_name: "facebook/sam-vit-base"
+  grid_size: 8
+  min_mask_area: 0.02
+  max_mask_area: 0.90
+  iou_threshold: 0.5
+  chunk_size: 16
+
 visualization:
   enabled: true
   output_dir: "results/viz"

@@ -12,6 +12,7 @@ from tqdm import tqdm
 from data.dataset import load_and_split
 from models.qwen import load_finetuned_qwen, load_base_qwen
 from models.grounding_dino import load_grounding_dino
+from models.sam import load_sam
 from pipeline.predictor import Predictor
 from utils.visualizer import save_visualization
 
@@ -46,9 +47,19 @@ def run_evaluation(
         print("GroundingDINO disabled — skipping load.")
         dino_model, dino_processor = None, None
 
+    sam_cfg = getattr(cfg, "sam", None)
+    sam_enabled = dino_enabled and sam_cfg is not None and getattr(sam_cfg, "enabled", False)
+    if sam_enabled:
+        print("Loading SAM ...")
+        sam_model, sam_processor = load_sam(cfg)
+    else:
+        print("SAM disabled — counting will use GroundingDINO bbox count.")
+        sam_model, sam_processor = None, None
+
     predictor = Predictor(
         qwen_model, qwen_processor,
         dino_model, dino_processor,
+        sam_model, sam_processor,
         cfg,
         reference_dir=reference_dir,
     )

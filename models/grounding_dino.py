@@ -118,19 +118,6 @@ def get_grounding_crop(
     }
 
 
-def grounding_count(
-    model,
-    processor,
-    image: Image.Image,
-    text_prompt: str,
-    cfg: SimpleNamespace,
-) -> int:
-    """Count detected objects by text prompt using GroundingDINO."""
-    box_thr = getattr(cfg.dino, "box_threshold", 0.25)
-    text_thr = getattr(cfg.dino, "text_threshold", 0.20)
-    boxes = _detect(model, processor, image, text_prompt, box_thr, text_thr)
-    return len(boxes)
-
 
 # ── Korean noun extraction & translation ──────────────────────────────────────
 

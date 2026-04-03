@@ -10,56 +10,65 @@ from pipeline.router import is_counting_question
 from models.qwen import qwen_predict, qwen_predict_with_crop
 from models.grounding_dino import (
     get_grounding_crop,
-    grounding_count,
     pick_answer_by_count,
     extract_object_noun,
 )
+from models.sam import count_instances_sam
 
 
 class Predictor:
-    """Routes each sample through GroundingDINO crop → Qwen3-VL or GroundingDINO count.
+    """Routes each sample through GroundingDINO crop + SAM count → Qwen3-VL.
 
-    If cfg.dino.enabled is False, GroundingDINO is not used:
-    - No crop is generated
-    - All questions go directly to Qwen with the original image
-    - trace will contain None for all detection-related fields
+    Counting flow:
+        GroundingDINO detects object region (bbox)
+        → SAM generates individual instance masks within bbox
+        → mask count → pick_answer_by_count
+        → fallback to Qwen with crop if count == 0
+
+    Non-counting flow:
+        GroundingDINO crop → Qwen with crop
+
+    If cfg.dino.enabled is False, skip all detection and use Qwen only.
     """
 
     def __init__(
         self,
         qwen_model,
         qwen_processor,
-        dino_model,        # GroundingDINO model (or None)
-        dino_processor,    # GroundingDINO processor (or None)
+        dino_model,
+        dino_processor,
+        sam_model,
+        sam_processor,
         cfg: SimpleNamespace,
-        reference_dir: str | None = None,  # unused with GroundingDINO, kept for CLI compat
+        reference_dir: str | None = None,  # unused, kept for CLI compat
     ) -> None:
         self.qwen_model = qwen_model
         self.qwen_processor = qwen_processor
         self.dino_model = dino_model
         self.dino_processor = dino_processor
+        self.sam_model = sam_model
+        self.sam_processor = sam_processor
         self.cfg = cfg
         self.dino_enabled = getattr(cfg.dino, "enabled", True)
 
     def predict(self, row: dict) -> str:
-        """Return predicted answer letter (a/b/c/d)."""
         answer, _ = self.predict_with_trace(row)
         return answer
 
     def predict_with_trace(self, row: dict) -> tuple[str, dict]:
-        """Return (answer, trace) with all intermediate results.
+        """Return (answer, trace).
 
         trace keys:
-            route          str        "grounding_count" | "qwen_with_crop" | "qwen_only"
-            bbox           tuple|None union bbox (x1,y1,x2,y2); None if disabled
-            blobs_bbox     list       individual detection boxes
-            attn_map       None       compat placeholder
-            attn_map_full  None       compat placeholder
-            crop           PIL.Image|None
-            used_full      bool|None
-            dino_count     int|None
-            text_prompt    str|None   object noun used as GroundingDINO prompt
-            raw_answer     str
+            route         "grounding_count" | "qwen_with_crop" | "qwen_only"
+            bbox          (x1,y1,x2,y2) | None
+            blobs_bbox    list of individual GroundingDINO boxes
+            attn_map      None  (compat placeholder)
+            attn_map_full None  (compat placeholder)
+            crop          PIL.Image | None
+            used_full     bool | None
+            dino_count    int | None   (SAM mask count for counting questions)
+            text_prompt   str | None
+            raw_answer    str
         """
         if not self.dino_enabled:
             return self._predict_qwen_only(row)
@@ -67,11 +76,8 @@ class Predictor:
 
     def _predict_qwen_only(self, row: dict) -> tuple[str, dict]:
         answer = qwen_predict(
-            self.qwen_model,
-            self.qwen_processor,
-            row,
-            self.cfg.data.image_root,
-            self.cfg,
+            self.qwen_model, self.qwen_processor,
+            row, self.cfg.data.image_root, self.cfg,
         )
         trace = {
             "route": "qwen_only",
@@ -90,12 +96,12 @@ class Predictor:
     def _predict_with_grounding(self, row: dict) -> tuple[str, dict]:
         image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))
         image = Image.open(image_path).convert("RGB")
+        orig_w, orig_h = image.width, image.height
 
-        # Extract object noun from question for GroundingDINO prompt
         question = str(row["question"])
         text_prompt = extract_object_noun(question)
 
-        # Step 1: detect objects and build crop
+        # Step 1: detect object region and build crop
         crop_result = get_grounding_crop(
             self.dino_model, self.dino_processor, image, text_prompt, self.cfg
         )
@@ -113,11 +119,19 @@ class Predictor:
             "raw_answer": None,
         }
 
-        # Step 2: counting questions → GroundingDINO count
+        # Step 2: counting → SAM instance counting within the detected bbox
         if is_counting_question(question):
-            count = grounding_count(
-                self.dino_model, self.dino_processor, image, text_prompt, self.cfg
-            )
+            bbox = crop_result["bbox"]
+            has_tight_bbox = bbox != (0, 0, orig_w, orig_h)
+
+            if self.sam_model is not None and has_tight_bbox:
+                count = count_instances_sam(
+                    self.sam_model, self.sam_processor, image, bbox, self.cfg
+                )
+            else:
+                # Fallback: use number of GroundingDINO boxes (may be 1 for stacked)
+                count = len(crop_result["blobs_bbox"]) or 1
+
             trace["dino_count"] = count
             answer = pick_answer_by_count(count, row)
 
@@ -125,6 +139,7 @@ class Predictor:
                 trace["route"] = "grounding_count"
                 trace["raw_answer"] = str(count)
                 return answer, trace
+            # count == 0 or no numeric choices → fall through to Qwen
 
         # Step 3: Qwen with original + crop
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -133,12 +148,8 @@ class Predictor:
 
         try:
             answer = qwen_predict_with_crop(
-                self.qwen_model,
-                self.qwen_processor,
-                row,
-                self.cfg.data.image_root,
-                crop_path,
-                self.cfg,
+                self.qwen_model, self.qwen_processor,
+                row, self.cfg.data.image_root, crop_path, self.cfg,
             )
         finally:
             os.unlink(crop_path)
