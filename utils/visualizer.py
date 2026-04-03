@@ -7,7 +7,8 @@ import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for server environments
 import matplotlib.font_manager as fm
 
-_KO_FONTS = [
+# Candidate font names (by registered name in matplotlib font manager)
+_KO_FONT_NAMES = [
     "NanumGothic",
     "NanumBarunGothic",
     "Noto Sans CJK KR",
@@ -17,19 +18,89 @@ _KO_FONTS = [
     "AppleGothic",
 ]
 
+# Candidate filename substrings to search for in system font paths
+_KO_FONT_FILE_KEYWORDS = [
+    "NanumGothic",
+    "NanumBarunGothic",
+    "NotoSansCJK",
+    "NotoSansKR",
+    "UnDotum",
+    "malgun",
+    "AppleGothic",
+]
+
+
 def _find_korean_font() -> str | None:
+    """Return a Korean-capable font name, or None if none found.
+
+    Strategy (in order):
+    0. Check project-local assets/fonts/ directory first (portable, no root needed).
+    1. Match by registered font name in matplotlib's font manager.
+    2. Search system font file paths for known Korean font filenames,
+       register the found file, then return its family name.
+    3. Rebuild the font cache once and retry strategy 1.
+    """
+    # Strategy 0: project-local font directory (assets/fonts/ next to project root)
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _local_font_dir = os.path.join(_project_root, "assets", "fonts")
+    if os.path.isdir(_local_font_dir):
+        for fname in sorted(os.listdir(_local_font_dir)):
+            if fname.lower().endswith((".ttf", ".otf")):
+                fpath = os.path.join(_local_font_dir, fname)
+                try:
+                    prop = fm.FontProperties(fname=fpath)
+                    family = prop.get_name()
+                    fm.fontManager.addfont(fpath)
+                    return family
+                except Exception:
+                    continue
+
+    # Strategy 1: name lookup
     available = {f.name for f in fm.fontManager.ttflist}
-    for name in _KO_FONTS:
+    for name in _KO_FONT_NAMES:
         if name in available:
             return name
+
+    # Strategy 2: file-path search (handles fonts installed but not yet cached)
+    search_paths: list[str] = []
+    for ext in ("ttf", "otf"):
+        search_paths += fm.findSystemFonts(fontpaths=None, fontext=ext)
+    # also check user font dir explicitly (may not be in system paths on some distros)
+    user_font_dir = os.path.expanduser("~/.local/share/fonts")
+    if os.path.isdir(user_font_dir):
+        for ext in ("ttf", "otf"):
+            search_paths += fm.findSystemFonts(fontpaths=[user_font_dir], fontext=ext)
+    for path in search_paths:
+        basename = os.path.basename(path)
+        if any(kw.lower() in basename.lower() for kw in _KO_FONT_FILE_KEYWORDS):
+            try:
+                prop = fm.FontProperties(fname=path)
+                family = prop.get_name()
+                fm.fontManager.addfont(path)
+                return family
+            except Exception:
+                continue
+
+    # Strategy 3: rebuild cache and retry name lookup
+    try:
+        fm._load_fontmanager(try_read_cache=False)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in _KO_FONT_NAMES:
+        if name in available:
+            return name
+
     return None
+
 
 _ko_font = _find_korean_font()
 if _ko_font:
     matplotlib.rcParams["font.family"] = "sans-serif"
     matplotlib.rcParams["font.sans-serif"] = [_ko_font, "DejaVu Sans"]
+    matplotlib.rcParams["axes.unicode_minus"] = False
 else:
-    warnings.filterwarnings("once", message="Glyph .* missing from font")
+    warnings.filterwarnings("ignore", message="Glyph .* missing from font")
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
