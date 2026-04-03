@@ -4,6 +4,8 @@ model:
   torch_dtype: "bfloat16"
   attn_implementation: "flash_attention_2"  # "eager" if flash_attn not installed
   device: "cuda"  # device_map for evaluation; "cuda" or "cuda:0"
+  min_pixels: 200704   # 256 * 28 * 28 — Qwen3-VL 이미지 토큰 하한
+  max_pixels: 1003520  # 1280 * 28 * 28 — Qwen3-VL 이미지 토큰 상한
 
 data:
   csv_path: "train.csv"
@@ -43,6 +45,9 @@ training:
   max_seq_length: 1024
   remove_unused_columns: false
   f1_eval_samples: 200          # epoch마다 F1 측정에 사용할 val 샘플 수
+  f1_eval_batch_size: 4         # F1 평가 시 배치 크기
+  shuffle_choices: true         # 학습 시 선택지 순서 셔플 (position bias 제거)
+  early_stopping_patience: 2   # eval_loss가 N epoch 연속 개선 없으면 학습 중단
 
 evaluation:
   output_dir: "results"

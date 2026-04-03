@@ -9,6 +9,16 @@ from peft import PeftModel
 from utils.prompt import build_messages, build_messages_with_crop, extract_answer
 
 
+def _load_processor(name: str, cfg: SimpleNamespace) -> AutoProcessor:
+    """Load AutoProcessor with optional min/max pixel budget from config."""
+    kwargs: dict = {}
+    if hasattr(cfg.model, "min_pixels"):
+        kwargs["min_pixels"] = cfg.model.min_pixels
+    if hasattr(cfg.model, "max_pixels"):
+        kwargs["max_pixels"] = cfg.model.max_pixels
+    return AutoProcessor.from_pretrained(name, **kwargs)
+
+
 def load_qwen(cfg: SimpleNamespace) -> tuple:
     """Load Qwen3-VL with 4-bit NF4 quantization for QLoRA training."""
     bnb_config = BitsAndBytesConfig(
@@ -37,7 +47,7 @@ def load_qwen(cfg: SimpleNamespace) -> tuple:
         )
 
     model.config.use_cache = False
-    processor = AutoProcessor.from_pretrained(cfg.model.qwen_name)
+    processor = _load_processor(cfg.model.qwen_name, cfg)
     return model, processor
 
 
@@ -63,9 +73,9 @@ def load_finetuned_qwen(checkpoint_dir: str, cfg: SimpleNamespace) -> tuple:
     model.eval()
 
     try:
-        processor = AutoProcessor.from_pretrained(checkpoint_dir)
+        processor = _load_processor(checkpoint_dir, cfg)
     except Exception:
-        processor = AutoProcessor.from_pretrained(cfg.model.qwen_name)
+        processor = _load_processor(cfg.model.qwen_name, cfg)
 
     return model, processor
 
@@ -90,7 +100,7 @@ def load_base_qwen(cfg: SimpleNamespace) -> tuple:
         )
 
     model.eval()
-    processor = AutoProcessor.from_pretrained(cfg.model.qwen_name)
+    processor = _load_processor(cfg.model.qwen_name, cfg)
     return model, processor
 
 

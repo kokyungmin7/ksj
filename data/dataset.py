@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 import torch
 import pandas as pd
 from torch.utils.data import Dataset
@@ -34,18 +36,42 @@ def load_and_split(cfg: SimpleNamespace) -> tuple[pd.DataFrame, pd.DataFrame]:
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
 
+def shuffle_choices(row: dict) -> dict:
+    """Shuffle a/b/c/d choices and remap the answer label accordingly.
+
+    Prevents position bias by randomizing choice order each time.
+    """
+    keys = ["a", "b", "c", "d"]
+    original_answer = str(row["answer"]).strip().lower()
+
+    shuffled = keys.copy()
+    random.shuffle(shuffled)
+
+    new_row = row.copy()
+    for new_key, old_key in zip(keys, shuffled):
+        new_row[new_key] = row[old_key]
+
+    new_row["answer"] = keys[shuffled.index(original_answer)]
+    return new_row
+
+
 class KoreanRecyclingVQADataset(Dataset):
     """Returns {"messages": [...]} dicts for use with VQADataCollator."""
 
-    def __init__(self, df: pd.DataFrame, image_root: str) -> None:
+    def __init__(
+        self, df: pd.DataFrame, image_root: str, shuffle: bool = False
+    ) -> None:
         self.df = df
         self.image_root = image_root
+        self.shuffle = shuffle
 
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx].to_dict()
+        if self.shuffle:
+            row = shuffle_choices(row)
         return {"messages": build_training_messages(row, self.image_root)}
 
 
