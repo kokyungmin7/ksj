@@ -4,10 +4,82 @@ from types import SimpleNamespace
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model
+from sklearn.metrics import f1_score
+from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 from trl import SFTTrainer, SFTConfig
 
 from data.dataset import KoreanRecyclingVQADataset, VQADataCollator, load_and_split
-from models.qwen import load_qwen
+from models.qwen import load_qwen, qwen_predict
+
+
+class F1EvalCallback(TrainerCallback):
+    """Epoch 종료 시 val subset에서 macro F1 / accuracy를 계산해 TensorBoard에 기록."""
+
+    def __init__(self, val_df, processor, cfg: SimpleNamespace) -> None:
+        self.val_df = val_df
+        self.processor = processor
+        self.cfg = cfg
+        self.writer = None
+
+    def on_train_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> None:
+        from torch.utils.tensorboard import SummaryWriter
+        self.writer = SummaryWriter(log_dir=args.logging_dir)
+
+    def on_epoch_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model=None,
+        **kwargs,
+    ) -> None:
+        max_samples = getattr(self.cfg.training, "f1_eval_samples", 200)
+        df = self.val_df.sample(min(max_samples, len(self.val_df)), random_state=42)
+
+        # use_cache must be True for generation
+        prev_use_cache = model.config.use_cache
+        model.config.use_cache = True
+        model.eval()
+
+        preds, gts = [], []
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            pred = qwen_predict(model, self.processor, row_dict, self.cfg.data.image_root, self.cfg)
+            preds.append(pred)
+            gts.append(str(row_dict["answer"]).strip().lower())
+
+        model.config.use_cache = prev_use_cache
+        model.train()
+
+        labels = ["a", "b", "c", "d"]
+        f1 = f1_score(gts, preds, labels=labels, average="macro", zero_division=0)
+        acc = sum(p == g for p, g in zip(preds, gts)) / len(gts)
+        epoch = int(state.epoch)
+
+        if self.writer:
+            self.writer.add_scalar("eval/f1_macro", f1, epoch)
+            self.writer.add_scalar("eval/accuracy", acc, epoch)
+
+        print(
+            f"\n[Epoch {epoch}] F1 macro: {f1:.4f}  |  Accuracy: {acc:.4f}"
+            f"  (n={len(gts)})"
+        )
+
+    def on_train_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> None:
+        if self.writer:
+            self.writer.close()
 
 
 def run_training(cfg: SimpleNamespace) -> None:
@@ -48,8 +120,7 @@ def run_training(cfg: SimpleNamespace) -> None:
         logging_steps=cfg.training.logging_steps,
         save_steps=cfg.training.save_steps,
         save_total_limit=cfg.training.save_total_limit,
-        eval_strategy="steps",
-        eval_steps=cfg.training.save_steps,
+        eval_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         bf16=cfg.training.bf16,
@@ -58,10 +129,12 @@ def run_training(cfg: SimpleNamespace) -> None:
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=cfg.training.remove_unused_columns,
         dataloader_num_workers=0,
-        report_to="none",
+        report_to="tensorboard",
         dataset_kwargs={"skip_prepare_dataset": True},
         max_seq_length=cfg.training.max_seq_length,
     )
+
+    f1_callback = F1EvalCallback(val_df, processor, cfg)
 
     trainer = SFTTrainer(
         model=model,
@@ -69,6 +142,7 @@ def run_training(cfg: SimpleNamespace) -> None:
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collator,
+        callbacks=[f1_callback],
     )
 
     trainer.train()

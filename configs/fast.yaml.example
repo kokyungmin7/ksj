@@ -41,6 +41,7 @@ training:
   gradient_checkpointing: true
   max_seq_length: 1024
   remove_unused_columns: false
+  f1_eval_samples: 50           # fast 실험용: 적은 샘플로 빠르게 측정
 
 evaluation:
   output_dir: "results"
