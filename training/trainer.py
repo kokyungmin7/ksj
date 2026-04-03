@@ -199,7 +199,6 @@ def run_training(cfg: SimpleNamespace) -> None:
         dataloader_num_workers=0,
         report_to="tensorboard",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_seq_length=cfg.training.max_seq_length,
     )
 
     patience = getattr(cfg.training, "early_stopping_patience", 2)
