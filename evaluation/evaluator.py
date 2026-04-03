@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
+from datetime import datetime
 from types import SimpleNamespace
 
 from PIL import Image
@@ -56,7 +57,11 @@ def run_evaluation(
     print(f"Evaluating on {len(val_df)} validation samples ...")
 
     viz_enabled = getattr(cfg, "visualization", None) and cfg.visualization.enabled
-    viz_dir = cfg.visualization.output_dir if viz_enabled else None
+    if viz_enabled:
+        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        viz_dir = os.path.join(cfg.visualization.output_dir, run_ts)
+    else:
+        viz_dir = None
     save_every = cfg.visualization.save_every if viz_enabled else 1
     max_viz = cfg.visualization.max_samples if viz_enabled else None
 
