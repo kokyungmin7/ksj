@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""test.csv + test/ 이미지로 추론 후 sample_submission.csv 형식(id,answer)으로 저장.
+"""test.csv + 이미지로 Qwen만 배치 추론 후 sample_submission.csv 형식(id,answer)으로 저장.
 
-평가(`evaluation/evaluator.py`)와 동일하게 `evaluation.batch_size` 단위로 `Predictor.predict_batch_with_trace`를 호출합니다.
-GroundingDINO가 켜져 있어도 Qwen 크롭 경로는 배치로 한 번에 생성합니다.
+GroundingDINO는 로드하지 않습니다. `dino.enabled` 설정과 무관하게 원본 이미지 1장 + 4지선다
+프롬프트로 `qwen_batch_predict`만 사용합니다 (`evaluate`에서 DINO 끈 경우와 동일한 추론 경로).
 
 예시 (GPU 추론 서버):
   uv run infer_submission.py \\
     --config configs/default.yaml \\
-    --checkpoint /home/kokyungmin/ksj/outputs/qwen35-lora/run_20260403_175736/checkpoint-1270 \\
-    --test-csv test.csv \\
-    --image-root /home/kokyungmin/ksj \\
+    --checkpoint /path/to/checkpoint-1270 \\
+    --test-csv /path/to/test.csv \\
+    --image-root /path/to/data_root \\
     --output submission.csv
 """
 from __future__ import annotations
@@ -22,9 +22,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from main import load_config
-from models.grounding_dino import load_grounding_dino
-from models.qwen import load_finetuned_qwen
-from pipeline.predictor import Predictor
+from models.qwen import load_finetuned_qwen, qwen_batch_predict
 
 
 def _row_to_dict(row: pd.Series) -> dict:
@@ -38,8 +36,19 @@ def _row_to_dict(row: pd.Series) -> dict:
     return d
 
 
+def _eval_batch_size(cfg) -> int:
+    ev = getattr(cfg, "evaluation", None)
+    raw = getattr(ev, "batch_size", 8) if ev is not None else 8
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 8
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="test 세트 제출용 CSV 생성")
+    parser = argparse.ArgumentParser(
+        description="Qwen 전용 — test 제출용 CSV 생성 (GroundingDINO 미사용)",
+    )
     parser.add_argument("--config", default="configs/default.yaml", help="YAML 설정")
     parser.add_argument(
         "--checkpoint",
@@ -50,12 +59,12 @@ def main() -> None:
     parser.add_argument(
         "--image-root",
         default=".",
-        help="test.csv의 path 컬럼 기준 상대 경로 루트 (보통 프로젝트 루트)",
+        help="test.csv의 path 컬럼 기준 상대 경로 루트",
     )
     parser.add_argument(
         "--output",
         default="submission.csv",
-        help="출력 파일 (컬럼: id,answer — sample_submission.csv와 동일)",
+        help="출력 (컬럼: id,answer)",
     )
     parser.add_argument(
         "--batch-size",
@@ -67,12 +76,23 @@ def main() -> None:
 
     cfg = load_config(args.config)
     cfg.data.image_root = os.path.abspath(args.image_root)
+
     if args.batch_size is not None:
         ev = getattr(cfg, "evaluation", None)
         if ev is None:
-            cfg.evaluation = SimpleNamespace(batch_size=args.batch_size)
+            cfg.evaluation = SimpleNamespace(
+                batch_size=int(args.batch_size),
+                max_new_tokens=5,
+            )
         else:
-            ev.batch_size = args.batch_size
+            ev.batch_size = int(args.batch_size)
+
+    batch_size = _eval_batch_size(cfg)
+    if getattr(cfg.dino, "enabled", False):
+        print(
+            "[infer_submission] 참고: config의 dino.enabled가 true여도 "
+            "이 스크립트는 Qwen 단일 경로만 사용합니다.",
+        )
 
     required_cols = {"path", "question", "a", "b", "c", "d"}
     df = pd.read_csv(args.test_csv)
@@ -84,40 +104,25 @@ def main() -> None:
         df = df.copy()
         df["id"] = df["path"].map(lambda p: os.path.basename(str(p)))
 
-    print(f"Loading fine-tuned Qwen from {args.checkpoint} ...")
-    qwen_model, qwen_processor = load_finetuned_qwen(args.checkpoint, cfg)
+    print(f"Loading fine-tuned Qwen from {args.checkpoint} (Qwen-only, batch_size={batch_size}) ...")
+    model, processor = load_finetuned_qwen(args.checkpoint, cfg)
 
-    dino_enabled = getattr(cfg.dino, "enabled", True)
-    if dino_enabled:
-        print("Loading GroundingDINO ...")
-        dino_model, dino_processor = load_grounding_dino(cfg)
-    else:
-        print("GroundingDINO disabled (config).")
-        dino_model, dino_processor = None, None
-
-    predictor = Predictor(
-        qwen_model,
-        qwen_processor,
-        dino_model,
-        dino_processor,
-        cfg,
-    )
-
-    batch_size = getattr(cfg.evaluation, "batch_size", 1)
     all_rows = [_row_to_dict(row) for _, row in df.iterrows()]
     ids = [str(r["id"]) for r in all_rows]
     preds: list[str] = []
 
     n_rows = len(all_rows)
+    image_root = cfg.data.image_root
     for start in tqdm(
         range(0, n_rows, batch_size),
-        desc="Inference",
+        desc="Qwen inference",
         total=(n_rows + batch_size - 1) // batch_size if n_rows else 0,
     ):
         batch = all_rows[start : start + batch_size]
-        batch_out = predictor.predict_batch_with_trace(batch)
-        for pred, _trace in batch_out:
-            preds.append(str(pred).strip().lower()[:1] if pred else "a")
+        letters = qwen_batch_predict(model, processor, batch, image_root, cfg)
+        for letter in letters:
+            c = str(letter).strip().lower()[:1] if letter else "a"
+            preds.append(c if c in "abcd" else "a")
 
     out_df = pd.DataFrame({"id": ids, "answer": preds})
     out_path = os.path.abspath(args.output)
