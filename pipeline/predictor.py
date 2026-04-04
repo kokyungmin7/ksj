@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from PIL import Image
 
 from pipeline.router import is_counting_question
-from models.qwen import qwen_predict, qwen_predict_with_crop, qwen_batch_predict
+from models.qwen import (
+    qwen_predict,
+    qwen_predict_with_crop,
+    qwen_batch_predict,
+    qwen_batch_predict_with_crop,
+)
 from models.grounding_dino import (
     get_grounding_crop,
     pick_answer_by_count,
@@ -87,9 +92,13 @@ class Predictor:
         return answer, trace
 
     def predict_batch_with_trace(self, rows: list[dict]) -> list[tuple[str, dict]]:
-        """Batch prediction. Falls back to sequential when GroundingDINO is enabled."""
+        """Batch prediction.
+
+        - DINO off: single Qwen batched forward (`qwen_batch_predict`).
+        - DINO on: GroundingDINO는 샘플별, Qwen 크롭 경로는 배치(`qwen_batch_predict_with_crop`).
+        """
         if self.dino_enabled:
-            return [self.predict_with_trace(row) for row in rows]
+            return self._predict_batch_with_grounding(rows)
 
         answers = qwen_batch_predict(
             self.qwen_model, self.qwen_processor,
@@ -112,6 +121,83 @@ class Predictor:
             }
             results.append((answer, trace))
         return results
+
+    def _predict_batch_with_grounding(self, rows: list[dict]) -> list[tuple[str, dict]]:
+        n = len(rows)
+        answers: list[str | None] = [None] * n
+        pending_rows: list[dict] = []
+        pending_crops: list[str] = []
+        pending_map: list[int] = []
+        tmp_paths: list[str] = []
+
+        try:
+            traces: list[dict | None] = [None] * n
+            for i, row in enumerate(rows):
+                image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))
+                image = Image.open(image_path).convert("RGB")
+
+                question = str(row["question"])
+                text_prompt = extract_object_noun(question, row)
+
+                crop_result = get_grounding_crop(
+                    self.dino_model, self.dino_processor, image, text_prompt, self.cfg
+                )
+
+                trace: dict = {
+                    "bbox": crop_result["bbox"],
+                    "blobs_bbox": crop_result["blobs_bbox"],
+                    "attn_map": None,
+                    "attn_map_full": None,
+                    "crop": crop_result["crop"],
+                    "used_full": crop_result["used_full"],
+                    "dino_count": None,
+                    "text_prompt": text_prompt,
+                    "route": None,
+                    "raw_answer": None,
+                }
+
+                if is_counting_question(question):
+                    count = len(crop_result["blobs_bbox"])
+                    trace["dino_count"] = count
+                    picked = pick_answer_by_count(count, row)
+                    if picked is not None:
+                        trace["route"] = "grounding_count"
+                        trace["raw_answer"] = str(count)
+                        answers[i] = picked
+                        traces[i] = trace
+                        continue
+
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    crop_path = tmp.name
+                    crop_result["crop"].save(crop_path, format="JPEG")
+                tmp_paths.append(crop_path)
+                pending_map.append(i)
+                pending_rows.append(row)
+                pending_crops.append(crop_path)
+                traces[i] = trace
+
+            if pending_rows:
+                batch_ans = qwen_batch_predict_with_crop(
+                    self.qwen_model,
+                    self.qwen_processor,
+                    pending_rows,
+                    self.cfg.data.image_root,
+                    pending_crops,
+                    self.cfg,
+                )
+                for j, ans in enumerate(batch_ans):
+                    idx = pending_map[j]
+                    traces[idx]["route"] = "qwen_with_crop"
+                    traces[idx]["raw_answer"] = ans
+                    answers[idx] = ans
+
+            return [(answers[i], traces[i]) for i in range(n)]
+        finally:
+            for p in tmp_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     def _predict_with_grounding(self, row: dict) -> tuple[str, dict]:
         image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))

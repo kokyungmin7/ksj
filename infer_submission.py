@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """test.csv + test/ 이미지로 추론 후 sample_submission.csv 형식(id,answer)으로 저장.
 
-평가 파이프라인(`Predictor`)과 동일하게 GroundingDINO(설정상 켜져 있을 때) + Qwen을 사용합니다.
+평가(`evaluation/evaluator.py`)와 동일하게 `evaluation.batch_size` 단위로 `Predictor.predict_batch_with_trace`를 호출합니다.
+GroundingDINO가 켜져 있어도 Qwen 크롭 경로는 배치로 한 번에 생성합니다.
 
 예시 (GPU 추론 서버):
   uv run infer_submission.py \\
@@ -102,13 +103,17 @@ def main() -> None:
         cfg,
     )
 
-    batch_size = getattr(cfg.evaluation, "batch_size", 8)
-    all_rows = [_row_to_dict(df.iloc[i]) for i in range(len(df))]
-    ids = [str(all_rows[i]["id"]) for i in range(len(all_rows))]
+    batch_size = getattr(cfg.evaluation, "batch_size", 1)
+    all_rows = [_row_to_dict(row) for _, row in df.iterrows()]
+    ids = [str(r["id"]) for r in all_rows]
     preds: list[str] = []
 
-    n_batch = (len(all_rows) + batch_size - 1) // batch_size
-    for start in tqdm(range(0, len(all_rows), batch_size), desc="Inference", total=n_batch):
+    n_rows = len(all_rows)
+    for start in tqdm(
+        range(0, n_rows, batch_size),
+        desc="Inference",
+        total=(n_rows + batch_size - 1) // batch_size if n_rows else 0,
+    ):
         batch = all_rows[start : start + batch_size]
         batch_out = predictor.predict_batch_with_trace(batch)
         for pred, _trace in batch_out:

@@ -189,6 +189,64 @@ def qwen_batch_predict(
 
 
 @torch.inference_mode()
+def qwen_batch_predict_with_crop(
+    model,
+    processor,
+    rows: list[dict],
+    image_root: str,
+    crop_paths: list[str],
+    cfg: SimpleNamespace,
+) -> list[str]:
+    """Batched inference: original + crop per row (same semantics as repeated qwen_predict_with_crop)."""
+    if len(rows) != len(crop_paths):
+        raise ValueError("rows and crop_paths must have the same length")
+    if not rows:
+        return []
+
+    enable_thinking = _get_enable_thinking(cfg)
+    all_messages = [
+        build_messages_with_crop(r, image_root, cp) for r, cp in zip(rows, crop_paths)
+    ]
+    texts = [
+        processor.apply_chat_template(
+            m, tokenize=False, add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        for m in all_messages
+    ]
+    images: list[Image.Image] = []
+    for m in all_messages:
+        images.extend(_extract_images(m))
+
+    prev_padding_side = processor.tokenizer.padding_side
+    processor.tokenizer.padding_side = "left"
+    batch = processor(
+        text=texts,
+        images=images if images else None,
+        padding=True,
+        truncation=True,
+        max_length=getattr(cfg, "training", SimpleNamespace(max_seq_length=2048)).max_seq_length,
+        return_tensors="pt",
+    )
+    batch = {k: v.to(model.device) for k, v in batch.items()}
+
+    output_ids = model.generate(
+        **batch,
+        max_new_tokens=cfg.evaluation.max_new_tokens,
+        do_sample=False,
+        temperature=None,
+        top_p=None,
+    )
+    prompt_len = batch["input_ids"].shape[1]
+    new_ids = output_ids[:, prompt_len:]
+    decoded = processor.batch_decode(
+        new_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+    )
+    processor.tokenizer.padding_side = prev_padding_side
+    return [extract_answer(t) for t in decoded]
+
+
+@torch.inference_mode()
 def qwen_predict_with_crop(
     model,
     processor,
@@ -198,35 +256,6 @@ def qwen_predict_with_crop(
     cfg: SimpleNamespace,
 ) -> str:
     """Run inference using both original image and GroundingDINO crop."""
-    messages = build_messages_with_crop(row, image_root, crop_path)
-    images = _extract_images(messages)
-
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=_get_enable_thinking(cfg),
-    )
-    inputs = processor(
-        text=[text],
-        images=images if images else None,
-        return_tensors="pt",
-    )
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-    output_ids = model.generate(
-        **inputs,
-        max_new_tokens=cfg.evaluation.max_new_tokens,
-        do_sample=False,
-        temperature=None,
-        top_p=None,
-    )
-
-    new_ids = output_ids[:, inputs["input_ids"].shape[1]:]
-    text = processor.batch_decode(
-        new_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
+    return qwen_batch_predict_with_crop(
+        model, processor, [row], image_root, [crop_path], cfg,
     )[0]
-
-    return extract_answer(text)
