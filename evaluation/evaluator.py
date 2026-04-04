@@ -63,39 +63,48 @@ def run_evaluation(
     save_every = cfg.visualization.save_every if viz_enabled else 1
     max_viz = cfg.visualization.max_samples if viz_enabled else None
 
+    batch_size = getattr(cfg.evaluation, "batch_size", 1)
+    all_rows = [row.to_dict() for _, row in val_df.iterrows()]
+
     predictions, ground_truths, samples = [], [], []
+    all_traces: list[dict] = []
     viz_count = 0
 
-    for idx, (_, row) in enumerate(tqdm(val_df.iterrows(), total=len(val_df), desc="Evaluating")):
-        row_dict = row.to_dict()
-        pred, trace = predictor.predict_with_trace(row_dict)
-        gt = str(row_dict["answer"]).strip().lower()
+    for start in tqdm(range(0, len(all_rows), batch_size), desc="Evaluating", total=(len(all_rows) + batch_size - 1) // batch_size):
+        batch_rows = all_rows[start : start + batch_size]
+        batch_results = predictor.predict_batch_with_trace(batch_rows)
 
-        predictions.append(pred)
-        ground_truths.append(gt)
-        samples.append({
-            "id": row_dict["id"],
-            "question": row_dict["question"],
-            "ground_truth": gt,
-            "predicted": pred,
-            "correct": pred == gt,
-            "route": trace["route"],
-            "bbox": list(trace["bbox"]) if trace["bbox"] is not None else [],
-            "dino_count": trace["dino_count"],
-        })
+        for i, (pred, trace) in enumerate(batch_results):
+            row_dict = batch_rows[i]
+            gt = str(row_dict["answer"]).strip().lower()
+            idx = start + i
 
-        should_viz = (
-            viz_enabled
-            and (idx % save_every == 0)
-            and (max_viz is None or viz_count < max_viz)
-        )
-        if should_viz:
-            image_path = os.path.join(cfg.data.image_root, str(row_dict["path"]))
-            original_image = Image.open(image_path).convert("RGB")
-            sample_id = str(row_dict["id"]).replace("/", "_")
-            out_path = os.path.join(viz_dir, f"{sample_id}.png")
-            save_visualization(original_image, trace, row_dict, pred, out_path)
-            viz_count += 1
+            predictions.append(pred)
+            ground_truths.append(gt)
+            all_traces.append(trace)
+            samples.append({
+                "id": row_dict["id"],
+                "question": row_dict["question"],
+                "ground_truth": gt,
+                "predicted": pred,
+                "correct": pred == gt,
+                "route": trace["route"],
+                "bbox": list(trace["bbox"]) if trace["bbox"] is not None else [],
+                "dino_count": trace["dino_count"],
+            })
+
+            should_viz = (
+                viz_enabled
+                and (idx % save_every == 0)
+                and (max_viz is None or viz_count < max_viz)
+            )
+            if should_viz:
+                image_path = os.path.join(cfg.data.image_root, str(row_dict["path"]))
+                original_image = Image.open(image_path).convert("RGB")
+                sample_id = str(row_dict["id"]).replace("/", "_")
+                out_path = os.path.join(viz_dir, f"{sample_id}.png")
+                save_visualization(original_image, trace, row_dict, pred, out_path)
+                viz_count += 1
 
     accuracy = sum(p == g for p, g in zip(predictions, ground_truths)) / len(predictions)
 

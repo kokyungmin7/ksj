@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 from pipeline.router import is_counting_question
-from models.qwen import qwen_predict, qwen_predict_with_crop
+from models.qwen import qwen_predict, qwen_predict_with_crop, qwen_batch_predict
 from models.grounding_dino import (
     get_grounding_crop,
     pick_answer_by_count,
@@ -85,6 +85,33 @@ class Predictor:
             "raw_answer": answer,
         }
         return answer, trace
+
+    def predict_batch_with_trace(self, rows: list[dict]) -> list[tuple[str, dict]]:
+        """Batch prediction. Falls back to sequential when GroundingDINO is enabled."""
+        if self.dino_enabled:
+            return [self.predict_with_trace(row) for row in rows]
+
+        answers = qwen_batch_predict(
+            self.qwen_model, self.qwen_processor,
+            rows, self.cfg.data.image_root, self.cfg,
+        )
+
+        results = []
+        for answer in answers:
+            trace = {
+                "route": "qwen_only",
+                "bbox": None,
+                "blobs_bbox": [],
+                "attn_map": None,
+                "attn_map_full": None,
+                "crop": None,
+                "used_full": None,
+                "dino_count": None,
+                "text_prompt": None,
+                "raw_answer": answer,
+            }
+            results.append((answer, trace))
+        return results
 
     def _predict_with_grounding(self, row: dict) -> tuple[str, dict]:
         image_path = os.path.join(self.cfg.data.image_root, str(row["path"]))

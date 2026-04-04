@@ -130,38 +130,62 @@ def qwen_predict(
     cfg: SimpleNamespace,
 ) -> str:
     """Run inference on a single row and return the predicted answer letter."""
-    messages = build_messages(row, image_root)
-    images = _extract_images(messages)
+    return qwen_batch_predict(model, processor, [row], image_root, cfg)[0]
 
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=_get_enable_thinking(cfg),
-    )
-    inputs = processor(
-        text=[text],
+
+@torch.inference_mode()
+def qwen_batch_predict(
+    model,
+    processor,
+    rows: list[dict],
+    image_root: str,
+    cfg: SimpleNamespace,
+) -> list[str]:
+    """Run batched inference on multiple rows and return predicted answer letters."""
+    enable_thinking = _get_enable_thinking(cfg)
+
+    all_messages = [build_messages(r, image_root) for r in rows]
+
+    texts = [
+        processor.apply_chat_template(
+            m, tokenize=False, add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        for m in all_messages
+    ]
+
+    images = []
+    for m_list in all_messages:
+        images.extend(_extract_images(m_list))
+
+    prev_padding_side = processor.tokenizer.padding_side
+    processor.tokenizer.padding_side = "left"
+    batch = processor(
+        text=texts,
         images=images if images else None,
+        padding=True,
+        truncation=True,
+        max_length=getattr(cfg, "training", SimpleNamespace(max_seq_length=2048)).max_seq_length,
         return_tensors="pt",
     )
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    batch = {k: v.to(model.device) for k, v in batch.items()}
 
     output_ids = model.generate(
-        **inputs,
+        **batch,
         max_new_tokens=cfg.evaluation.max_new_tokens,
         do_sample=False,
         temperature=None,
         top_p=None,
     )
 
-    new_ids = output_ids[:, inputs["input_ids"].shape[1]:]
-    text = processor.batch_decode(
-        new_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
+    prompt_len = batch["input_ids"].shape[1]
+    new_ids = output_ids[:, prompt_len:]
+    decoded = processor.batch_decode(
+        new_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+    )
+    processor.tokenizer.padding_side = prev_padding_side
 
-    return extract_answer(text)
+    return [extract_answer(t) for t in decoded]
 
 
 @torch.inference_mode()

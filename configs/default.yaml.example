@@ -52,6 +52,7 @@ training:
 evaluation:
   output_dir: "results"
   max_new_tokens: 5
+  batch_size: 8                  # 평가 시 배치 크기 (VRAM에 맞게 조절)
 
 dino:
   enabled: true                                    # false: detector not loaded; Qwen uses original image only
